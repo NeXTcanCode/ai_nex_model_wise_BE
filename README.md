@@ -39,19 +39,6 @@ npm run dev
 npm start
 ```
 
-## Env vars
-
-```env
-PORT=5001
-MONGODB_URI=mongodb://127.0.0.1:27017/ai_model_recommender
-MONGODB_DB_NAME=ai_model_recommender
-FRONTEND_ORIGIN=http://localhost:5173
-GROQ_API_KEY=your_key
-GROQ_MODEL=llama-3.3-70b-versatile
-OPENROUTER_API_KEY=your_key
-MAX_PROMPT_CHARACTERS=20000
-```
-
 ## API
 
 Base path: `/api/v1`
