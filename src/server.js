@@ -18,7 +18,8 @@ const app = express();
 const port = Number(process.env.PORT || 5001);
 const sessions = new Map();
 app.use(helmet());
-app.use(cors({ origin: process.env.FRONTEND_ORIGIN?.split(",") || ["https://model-wise.netlify.app"], optionsSuccessStatus: 200 }));
+app.use(cors({ origin: process.env.FRONTEND_ORIGIN?.split(",") || ["https://model-wise.netlify.app"], optionsSuccessStatus: 200, credentials: true }));
+app.options("*", cors({ origin: process.env.FRONTEND_ORIGIN?.split(",") || ["https://model-wise.netlify.app"], optionsSuccessStatus: 200, credentials: true }));
 app.use(express.json({ limit: "1mb" }));
 const error = (res, status, code, message, details = []) =>
   res
