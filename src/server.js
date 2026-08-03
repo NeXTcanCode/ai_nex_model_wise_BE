@@ -25,7 +25,6 @@ import {
   promptHash,
   rankModels,
   sanitize,
-  userModels,
 } from "./lib/recommendations.js";
 
 const app = express();
@@ -70,6 +69,7 @@ const normalize = (s) =>
     .trim()
     .toLowerCase();
 const publicUser = (u) => ({ id: u.id, name: u.name, email: u.email });
+const userModels = (userId) => models.find({ userId });
 
 const signToken = (user) =>
   jwt.sign({ sub: user.id }, jwtSecret, { expiresIn: jwtExpiresIn });
