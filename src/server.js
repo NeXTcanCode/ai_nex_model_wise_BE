@@ -100,6 +100,8 @@ async function auth(req, res, next) {
       "UNAUTHORIZED",
       "A valid temporary session is required."
     );
+  for (const displayName of ["Claude Sonnet 4", "GPT-4.1", "Gemini 2.5 Pro"])
+    await models.deleteOne({ userId: user.id, displayName });
   req.user = user;
   next();
 }
@@ -154,6 +156,10 @@ app.post("/api/v1/auth/login", async (req, res, next) => {
         "INVALID_CREDENTIALS",
         "Email or password is incorrect."
       );
+    // Remove models created by the old registration seed. This is a one-time
+    // cleanup for existing accounts; user-created models remain untouched.
+    for (const displayName of ["Claude Sonnet 4", "GPT-4.1", "Gemini 2.5 Pro"])
+      await models.deleteOne({ userId: user.id, displayName });
     return ok(res, authPayload(user));
   } catch (e) {
     next(e);
