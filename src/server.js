@@ -361,7 +361,13 @@ async function rankWithGroq(prompt, candidates, context) {
       messages: [
         {
           role: "system",
-          content: `You are a model-selection evaluator. Analyze the task and rank every supplied candidate using only the supplied model metadata and task. Derive criteria and weights appropriate to this specific task; do not use fixed criteria or unsupported reputation claims. Weights must total 1 and scores must be 0-100. Confidence must be 0-1 and represent certainty that rank 1 is better than rank 2, accounting for score margin, missing metadata, and task ambiguity. Return JSON only: {"assessment":{"taskDomain":"string","taskType":"string","complexity":"string","reasoningRequirement":"string","contextRequirement":"string","precisionRequirement":"string","riskLevel":"string"},"ranking":[{"modelId":"candidate id","score":number,"breakdown":[{"criterion":"string","weight":number,"score":number,"reason":"string"}],"reasons":["string"],"limitations":["string"]}],"confidence":number,"confidenceReasons":["string"],"summary":"string"}. Include every candidate exactly once, sorted best first.`,
+          content: `You are a cost-aware model-selection evaluator. Analyze the task and rank every supplied candidate using only the supplied model metadata and task.
+
+First determine whether each candidate is fully capable of completing the task. Among fully capable candidates, prefer the least expensive option. Capability beyond the task's actual requirements is not a benefit and must not increase a model's score. A more capable or premium model may rank first only when its additional capability materially improves this specific task or a cheaper candidate lacks a required feature, context capacity, reasoning ability, or precision. For short, routine code, UI, formatting, extraction, rewriting, or other straightforward tasks, prefer the cheaper capable model. Never use general model reputation or provider prestige.
+
+Derive criteria and weights appropriate to this specific task; do not use fixed criteria or unsupported claims. Include cost efficiency as a criterion whenever comparable pricing is available. Weights must total 1 and scores must be 0-100. Confidence must be 0-1 and represent certainty that rank 1 is the best value for this task, accounting for capability sufficiency, price, score margin, missing metadata, and task ambiguity.
+
+Return JSON only: {"assessment":{"taskDomain":"string","taskType":"string","complexity":"string","reasoningRequirement":"string","contextRequirement":"string","precisionRequirement":"string","riskLevel":"string"},"ranking":[{"modelId":"candidate id","capable":boolean,"score":number,"breakdown":[{"criterion":"string","weight":number,"score":number,"reason":"string"}],"reasons":["string"],"limitations":["string"]}],"confidence":number,"confidenceReasons":["string"],"summary":"string"}. Include every candidate exactly once, sorted best first.`,
         },
         { role: "user", content: JSON.stringify({ prompt, context, candidates: metadata }) },
       ],
@@ -378,7 +384,7 @@ async function rankWithGroq(prompt, candidates, context) {
     throw new Error("Groq returned unknown or duplicate candidate IDs.");
   const ranking = result.ranking.map((item, index) => {
     const score = Number(item.score);
-    if (!Number.isFinite(score) || score < 0 || score > 100 || !Array.isArray(item.breakdown))
+    if (typeof item.capable !== "boolean" || !Number.isFinite(score) || score < 0 || score > 100 || !Array.isArray(item.breakdown))
       throw new Error("Groq returned an invalid score breakdown.");
     const weightTotal = item.breakdown.reduce((total, part) => total + Number(part.weight), 0);
     if (!Number.isFinite(weightTotal) || Math.abs(weightTotal - 1) > 0.01)
@@ -388,6 +394,8 @@ async function rankWithGroq(prompt, candidates, context) {
   });
   if (ranking.some((item, index) => index && item.score > ranking[index - 1].score))
     throw new Error("Groq ranking is not sorted by score.");
+  if (ranking.some((item, index) => item.capable && ranking.slice(0, index).some((earlier) => !earlier.capable)))
+    throw new Error("Groq ranked an incapable model above a capable model.");
   const confidence = Number(result.confidence);
   if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1)
     throw new Error("Groq returned invalid confidence.");
