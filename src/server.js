@@ -212,6 +212,7 @@ app.post("/api/v1/models", auth, async (req, res, next) => {
       inputPricePerMillion: req.body.inputPricePerMillion == null ? null : Number(req.body.inputPricePerMillion),
       outputPricePerMillion: req.body.outputPricePerMillion == null ? null : Number(req.body.outputPricePerMillion),
       pricingCurrency: req.body.pricingCurrency || "USD",
+      openRouterModelId: req.body.openRouterModelId || null,
       notes: req.body.notes || "",
       isActive: true,
       source:
@@ -237,7 +238,7 @@ app.post("/api/v1/models/suggestions", auth, async (req, res, next) => {
         return !words.length || words.every((word) => text.includes(word));
       })
       .slice(0, 5)
-      .map((model) => ({ displayName: model.name, providerName: model.id.split("/")[0] || "Unknown" }));
+      .map((model) => ({ displayName: model.name, providerName: model.id.split("/")[0] || "Unknown", openRouterModelId: model.id }));
     return ok(res, { suggestions });
   } catch (error) { next(error); }
 });
@@ -314,19 +315,92 @@ app.delete("/api/v1/models/:modelId", auth, async (req, res, next) => {
   }
 });
 
-async function rankWithGroq(prompt, candidates, assessment, context) {
-  if (!process.env.GROQ_API_KEY || candidates.length < 2) return null;
-  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", { method: "POST", headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" }, body: JSON.stringify({ model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile", temperature: 0, response_format: { type: "json_object" }, messages: [{ role: "system", content: "Rank only the supplied AI models. First prioritize token/context size and choose the cheapest capable model. Use complexity signals only to upgrade when needed. Never choose an expensive model for a short simple prompt. Return JSON only: {recommendedModel, suitableModels, confidence, reason}. suitableModels must contain the supplied model IDs or exact names that can reasonably handle the prompt, including the recommended model. confidence must be 0-1." }, { role: "user", content: JSON.stringify({ prompt, candidates: candidates.map(({ id, displayName, providerName }) => ({ id, displayName, providerName })), assessment, context }) }] }) });
-  if (!response.ok) return null;
-  const data = await response.json();
-  const ranking = JSON.parse(data.choices?.[0]?.message?.content || "{}");
-  const recommended = candidates.find((model) => model.id === ranking.recommendedModel || model.displayName.toLowerCase() === String(ranking.recommendedModel).toLowerCase());
-  if (!recommended) return null;
-  const suitable = Array.isArray(ranking.suitableModels) ? ranking.suitableModels : [];
-  return { recommended, suitable, confidence: Math.min(1, Math.max(0, Number(ranking.confidence) || 0.7)), reason: ranking.reason || "Groq balanced capability, context fit, and cost-efficiency." };
+async function fetchCandidateMetadata(candidates) {
+  const headers = {};
+  if (process.env.OPENROUTER_API_KEY)
+    headers.Authorization = `Bearer ${process.env.OPENROUTER_API_KEY}`;
+  const response = await fetch("https://openrouter.ai/api/v1/models", { headers });
+  if (!response.ok)
+    throw new Error(`OpenRouter metadata request returned ${response.status}.`);
+  const catalog = (await response.json()).data || [];
+  return candidates.map((candidate) => {
+    const words = normalize(candidate.displayName).split(/\s+/).filter(Boolean);
+    const metadata =
+      catalog.find((item) => item.id === candidate.openRouterModelId) ||
+      catalog.find((item) =>
+        words.every((word) => normalize(`${item.name} ${item.id}`).includes(word))
+      );
+    return {
+      id: candidate.id,
+      displayName: candidate.displayName,
+      providerName: candidate.providerName,
+      openRouterModelId: metadata?.id || candidate.openRouterModelId || null,
+      description: metadata?.description || null,
+      contextLength: metadata?.context_length || null,
+      architecture: metadata?.architecture || null,
+      supportedParameters: metadata?.supported_parameters || [],
+      pricing: metadata?.pricing || {
+        prompt: candidate.inputPricePerMillion == null ? null : candidate.inputPricePerMillion / 1000000,
+        completion: candidate.outputPricePerMillion == null ? null : candidate.outputPricePerMillion / 1000000,
+      },
+    };
+  });
 }
 
-import { assess, choose, estimateTokens, fitsAssessment, maxPrompt, rankModels } from "./lib/recommendations.js";
+async function rankWithGroq(prompt, candidates, context) {
+  if (!process.env.GROQ_API_KEY) throw new Error("GROQ_API_KEY is not configured.");
+  if (!process.env.GROQ_MODEL) throw new Error("GROQ_MODEL is not configured.");
+  const metadata = await fetchCandidateMetadata(candidates);
+  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: process.env.GROQ_MODEL,
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `You are a model-selection evaluator. Analyze the task and rank every supplied candidate using only the supplied model metadata and task. Derive criteria and weights appropriate to this specific task; do not use fixed criteria or unsupported reputation claims. Weights must total 1 and scores must be 0-100. Confidence must be 0-1 and represent certainty that rank 1 is better than rank 2, accounting for score margin, missing metadata, and task ambiguity. Return JSON only: {"assessment":{"taskDomain":"string","taskType":"string","complexity":"string","reasoningRequirement":"string","contextRequirement":"string","precisionRequirement":"string","riskLevel":"string"},"ranking":[{"modelId":"candidate id","score":number,"breakdown":[{"criterion":"string","weight":number,"score":number,"reason":"string"}],"reasons":["string"],"limitations":["string"]}],"confidence":number,"confidenceReasons":["string"],"summary":"string"}. Include every candidate exactly once, sorted best first.`,
+        },
+        { role: "user", content: JSON.stringify({ prompt, context, candidates: metadata }) },
+      ],
+    }),
+  });
+  if (!response.ok) throw new Error(`Groq ranking request returned ${response.status}.`);
+  const data = await response.json();
+  const result = JSON.parse(data.choices?.[0]?.message?.content || "{}");
+  if (!Array.isArray(result.ranking) || result.ranking.length !== candidates.length)
+    throw new Error("Groq returned an incomplete ranking.");
+  const expectedIds = new Set(candidates.map((candidate) => candidate.id));
+  const returnedIds = new Set(result.ranking.map((item) => item.modelId));
+  if (returnedIds.size !== expectedIds.size || [...expectedIds].some((id) => !returnedIds.has(id)))
+    throw new Error("Groq returned unknown or duplicate candidate IDs.");
+  const ranking = result.ranking.map((item, index) => {
+    const score = Number(item.score);
+    if (!Number.isFinite(score) || score < 0 || score > 100 || !Array.isArray(item.breakdown))
+      throw new Error("Groq returned an invalid score breakdown.");
+    const weightTotal = item.breakdown.reduce((total, part) => total + Number(part.weight), 0);
+    if (!Number.isFinite(weightTotal) || Math.abs(weightTotal - 1) > 0.01)
+      throw new Error("Groq criterion weights do not total 1.");
+    const model = candidates.find((candidate) => candidate.id === item.modelId);
+    return { ...item, rank: index + 1, score, name: model.displayName, providerName: model.providerName };
+  });
+  if (ranking.some((item, index) => index && item.score > ranking[index - 1].score))
+    throw new Error("Groq ranking is not sorted by score.");
+  const confidence = Number(result.confidence);
+  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1)
+    throw new Error("Groq returned invalid confidence.");
+  return {
+    assessment: result.assessment && typeof result.assessment === "object" ? result.assessment : {},
+    ranking,
+    confidence,
+    confidenceReasons: Array.isArray(result.confidenceReasons) ? result.confidenceReasons : [],
+    summary: String(result.summary || ""),
+  };
+}
+
+import { estimateTokens, maxPrompt } from "./lib/recommendations.js";
 
 const visibleRec = (r) => {
   const { userId, ...safe } = r;
@@ -374,27 +448,21 @@ app.post("/api/v1/recommendations", auth, async (req, res, next) => {
       contextDetails: String(req.body.context?.contextDetails || "").slice(0, 300),
       ...req.body.context,
     };
-    const assessment = assess(prompt, context),
-      fitCandidates = candidates.filter((model) => fitsAssessment(model, assessment)),
-      ranked = rankModels(candidates, assessment),
-      pricedCandidates = (fitCandidates.length ? fitCandidates : ranked).filter((model) => model.inputPricePerMillion != null),
-      recommended = pricedCandidates[0] || choose(candidates, assessment),
-      alternative = pricedCandidates.find((model) => model.id !== recommended.id) || ranked.find((model) => model.id !== recommended.id) || null,
+    const evaluated = await rankWithGroq(prompt, candidates, context),
+      assessment = evaluated.assessment,
+      recommended = candidates.find((model) => model.id === evaluated.ranking[0].modelId),
+      alternative = evaluated.ranking[1]
+        ? candidates.find((model) => model.id === evaluated.ranking[1].modelId)
+        : null,
       redacted = sanitize(prompt),
-      confidence = candidates.length === 1 ? 0.72 : 0.6,
+      confidence = evaluated.confidence,
       inputTokens = estimateTokens(prompt),
       candidateCosts = candidates.map((model) => ({ model: model.displayName, usd: model.inputPricePerMillion == null ? null : inputTokens * model.inputPricePerMillion / 1000000 })),
       recommendedCost = candidateCosts.find((item) => item.model === recommended.displayName)?.usd,
       alternativeCost = alternative && candidateCosts.find((item) => item.model === alternative.displayName)?.usd,
       estimatedSavingsUsd = recommendedCost == null || alternativeCost == null ? null : Math.max(0, alternativeCost - recommendedCost),
-      reasons = [
-        `${assessment.taskType.replaceAll("_", " ")} needs ${assessment.reasoningRequirement}-level reasoning.`,
-        "Fallback ranking balanced model capability and cost-efficiency.",
-        context.hasContext
-          ? "The supplied context metadata was included in the assessment."
-          : "No additional context was reported.",
-      ],
-      summary = `${recommended.displayName} is the best fit among the selected models.`;
+      reasons = evaluated.ranking[0].reasons || [],
+      summary = evaluated.summary;
     const rec = await recommendations.create({
       id: id(),
       userId: req.user.id,
@@ -420,6 +488,8 @@ app.post("/api/v1/recommendations", auth, async (req, res, next) => {
         estimatedSavingsUsd,
         reasons,
         summary,
+        ranking: evaluated.ranking,
+        confidenceReasons: evaluated.confidenceReasons,
       },
       feedback: null,
       createdAt: now(),
@@ -441,6 +511,8 @@ app.post("/api/v1/recommendations", auth, async (req, res, next) => {
         estimatedSavingsUsd,
         reasons,
         summary,
+        ranking: evaluated.ranking,
+        confidenceReasons: evaluated.confidenceReasons,
       },
       201
     );
