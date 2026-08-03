@@ -33,8 +33,22 @@ const port = Number(process.env.PORT || 5001);
 const cookieName = "mw_token";
 const jwtSecret = process.env.JWT_SECRET || "change-me";
 const jwtExpiresIn = process.env.JWT_EXPIRES_IN || "7d";
+const allowedOrigins = [
+  "https://model-wise.netlify.app",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  ...(process.env.FRONTEND_ORIGIN || "")
+    .split(",")
+    .map((origin) => origin.trim().replace(/\/$/, ""))
+    .filter(Boolean),
+];
 const corsOptions = {
-  origin: process.env.FRONTEND_ORIGIN?.split(",") || ["https://model-wise.netlify.app"],
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin.replace(/\/$/, ""))) {
+      return callback(null, true);
+    }
+    return callback(new Error("CORS origin not allowed"));
+  },
   credentials: true,
   optionsSuccessStatus: 200,
 };
