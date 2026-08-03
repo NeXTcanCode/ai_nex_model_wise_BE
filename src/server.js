@@ -17,9 +17,21 @@ import {
 const app = express();
 const port = Number(process.env.PORT || 5001);
 const sessions = new Map();
+const allowedOrigins = (process.env.FRONTEND_ORIGIN || "https://model-wise.netlify.app")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error("CORS origin not allowed"));
+  },
+  optionsSuccessStatus: 200,
+  credentials: true,
+};
 app.use(helmet());
-app.use(cors({ origin: process.env.FRONTEND_ORIGIN?.split(",") || ["https://model-wise.netlify.app"], optionsSuccessStatus: 200, credentials: true }));
-app.options("*", cors({ origin: process.env.FRONTEND_ORIGIN?.split(",") || ["https://model-wise.netlify.app"], optionsSuccessStatus: 200, credentials: true }));
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 app.use(express.json({ limit: "1mb" }));
 const error = (res, status, code, message, details = []) =>
   res
