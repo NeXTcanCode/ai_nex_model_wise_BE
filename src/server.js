@@ -152,7 +152,7 @@ app.post("/api/v1/auth/register", async (req, res, next) => {
       id: id(),
       name,
       email,
-      password: passwordHash,
+      passwordHash,
       createdAt: now(),
     });
     for (const [displayName, providerName] of [
@@ -192,7 +192,7 @@ app.post("/api/v1/auth/login", async (req, res, next) => {
         "INVALID_CREDENTIALS",
         "Email or password is incorrect."
       );
-    const okPass = await bcrypt.compare(password, user.password || "");
+    const okPass = await bcrypt.compare(password, user.passwordHash || "");
     if (!okPass)
       return error(
         res,
