@@ -5,7 +5,7 @@ Express + MongoDB backend for AI model recommender app.
 ## What it does
 
 - Register/login/logout users
-- Keep auth in temporary sessions
+- Keep auth sessions in MongoDB so deployments and restarts do not sign users out
 - Save user-specific model list
 - Add, edit, enable, disable, delete models
 - Get model-name suggestions from OpenRouter

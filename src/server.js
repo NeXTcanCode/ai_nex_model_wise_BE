@@ -9,6 +9,7 @@ import {
   users,
   models,
   recommendations,
+  sessions as sessionStore,
   memory,
   setPersistence,
   id,
@@ -16,7 +17,6 @@ import {
 
 const app = express();
 const port = Number(process.env.PORT || 5001);
-const sessions = new Map();
 const allowedOrigins = (process.env.FRONTEND_ORIGIN || "")
   .split(",")
   .map((origin) => origin.trim().replace(/\/$/, ""))
@@ -84,38 +84,49 @@ const validateAuth = (body) => {
   if (password.length < 8) return "Password must be at least 8 characters.";
   return null;
 };
-const issue = (user) => {
+const issue = async (user) => {
   const token = crypto.randomBytes(32).toString("hex");
-  sessions.set(token, user.id);
+  const ttlDays = Number(process.env.SESSION_TTL_DAYS || 7);
+  await sessionStore.create({
+    id: id(),
+    token,
+    userId: user.id,
+    expiresAt: new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000),
+  });
   return token;
 };
 async function auth(req, res, next) {
   const token = req.get("authorization")?.replace(/^Bearer\s+/i, "");
-  const userId = token && sessions.get(token);
-  const user = userId && (await users.findOne({ id: userId }));
+  const session = token && (await sessionStore.findOne({ token }));
+  if (session && new Date(session.expiresAt) <= new Date()) {
+    await sessionStore.deleteOne({ token });
+  }
+  const user = session && new Date(session.expiresAt) > new Date()
+    ? await users.findOne({ id: session.userId })
+    : null;
   if (!user)
     return error(
       res,
       401,
       "UNAUTHORIZED",
-      "A valid temporary session is required."
+      "A valid session is required."
     );
   for (const displayName of ["Claude Sonnet 4", "GPT-4.1", "Gemini 2.5 Pro"])
     await models.deleteOne({ userId: user.id, displayName });
   req.user = user;
   next();
 }
-const authPayload = (user) => ({
+const authPayload = async (user) => ({
   user: publicUser(user),
-  token: issue(user),
-  authMode: "temporary-session",
+  token: await issue(user),
+  authMode: "persistent-session",
 });
 
 app.get("/health", (_req, res) =>
   ok(res, {
     status: "ok",
     service: "ai-model-recommender-api",
-    authMode: "temporary-session",
+    authMode: "persistent-session",
     persistence: mongoose.connection.readyState === 1 ? "mongodb" : "memory",
   })
 );
@@ -138,7 +149,7 @@ app.post("/api/v1/auth/register", async (req, res, next) => {
       password: String(req.body.password),
       createdAt: now(),
     });
-    return ok(res, authPayload(user), 201);
+    return ok(res, await authPayload(user), 201);
   } catch (e) {
     next(e);
   }
@@ -160,18 +171,22 @@ app.post("/api/v1/auth/login", async (req, res, next) => {
     // cleanup for existing accounts; user-created models remain untouched.
     for (const displayName of ["Claude Sonnet 4", "GPT-4.1", "Gemini 2.5 Pro"])
       await models.deleteOne({ userId: user.id, displayName });
-    return ok(res, authPayload(user));
+    return ok(res, await authPayload(user));
   } catch (e) {
     next(e);
   }
 });
 app.get("/api/v1/auth/me", auth, (req, res) =>
-  ok(res, { user: publicUser(req.user), authMode: "temporary-session" })
+  ok(res, { user: publicUser(req.user), authMode: "persistent-session" })
 );
-app.post("/api/v1/auth/logout", (req, res) => {
+app.post("/api/v1/auth/logout", async (req, res, next) => {
+  try {
   const token = req.get("authorization")?.replace(/^Bearer\s+/i, "");
-  if (token) sessions.delete(token);
+  if (token) await sessionStore.deleteOne({ token });
   return ok(res, { loggedOut: true });
+  } catch (e) {
+    next(e);
+  }
 });
 
 const modelSuggestions = [
@@ -320,8 +335,12 @@ async function fetchCandidateMetadata(candidates) {
   if (process.env.OPENROUTER_API_KEY)
     headers.Authorization = `Bearer ${process.env.OPENROUTER_API_KEY}`;
   const response = await fetch("https://openrouter.ai/api/v1/models", { headers });
-  if (!response.ok)
-    throw new Error(`OpenRouter metadata request returned ${response.status}.`);
+  if (!response.ok) {
+    const failure = new Error(`OpenRouter metadata request returned ${response.status}.`);
+    failure.statusCode = 502;
+    failure.errorCode = "MODEL_METADATA_UNAVAILABLE";
+    throw failure;
+  }
   const catalog = (await response.json()).data || [];
   return candidates.map((candidate) => {
     const words = normalize(candidate.displayName).split(/\s+/).filter(Boolean);
@@ -347,17 +366,99 @@ async function fetchCandidateMetadata(candidates) {
   });
 }
 
+const rankingFailure = (message) => {
+  const failure = new Error(message);
+  failure.statusCode = 502;
+  failure.errorCode = "INVALID_RANKING_RESPONSE";
+  return failure;
+};
+
+const rankingResponseFormat = {
+  type: "json_schema",
+  json_schema: {
+    name: "model_ranking",
+    strict: true,
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        assessment: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            taskDomain: { type: "string" },
+            taskType: { type: "string" },
+            complexity: { type: "string" },
+            reasoningRequirement: { type: "string" },
+            contextRequirement: { type: "string" },
+            precisionRequirement: { type: "string" },
+            riskLevel: { type: "string" },
+          },
+          required: ["taskDomain", "taskType", "complexity", "reasoningRequirement", "contextRequirement", "precisionRequirement", "riskLevel"],
+        },
+        ranking: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              modelId: { type: "string" },
+              capable: { type: "boolean" },
+              score: { type: "number" },
+              breakdown: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    criterion: { type: "string" },
+                    weight: { type: "number" },
+                    score: { type: "number" },
+                    reason: { type: "string" },
+                  },
+                  required: ["criterion", "weight", "score", "reason"],
+                },
+              },
+              reasons: { type: "array", items: { type: "string" } },
+              limitations: { type: "array", items: { type: "string" } },
+            },
+            required: ["modelId", "capable", "score", "breakdown", "reasons", "limitations"],
+          },
+        },
+        confidence: { type: "number" },
+        confidenceReasons: { type: "array", items: { type: "string" } },
+        summary: { type: "string" },
+      },
+      required: ["assessment", "ranking", "confidence", "confidenceReasons", "summary"],
+    },
+  },
+};
+
 async function rankWithGroq(prompt, candidates, context) {
-  if (!process.env.GROQ_API_KEY) throw new Error("GROQ_API_KEY is not configured.");
-  if (!process.env.GROQ_MODEL) throw new Error("GROQ_MODEL is not configured.");
-  const metadata = await fetchCandidateMetadata(candidates);
+  if (!process.env.GROQ_API_KEY || !process.env.GROQ_MODEL) {
+    const failure = new Error("The ranking service is not configured.");
+    failure.statusCode = 503;
+    failure.errorCode = "RANKING_SERVICE_UNAVAILABLE";
+    throw failure;
+  }
+  const inputTokens = estimateTokens(prompt);
+  const metadata = (await fetchCandidateMetadata(candidates)).map((model) => {
+    const promptPrice = Number(model.pricing?.prompt);
+    return {
+      ...model,
+      estimatedInputCostUsd:
+        Number.isFinite(promptPrice) && promptPrice >= 0
+          ? inputTokens * promptPrice
+          : null,
+    };
+  });
   const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       model: process.env.GROQ_MODEL,
       temperature: 0,
-      response_format: { type: "json_object" },
+      response_format: rankingResponseFormat,
       messages: [
         {
           role: "system",
@@ -373,37 +474,85 @@ Return JSON only: {"assessment":{"taskDomain":"string","taskType":"string","comp
       ],
     }),
   });
-  if (!response.ok) throw new Error(`Groq ranking request returned ${response.status}.`);
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    const failure = new Error(body.error?.message || `Groq ranking request returned ${response.status}.`);
+    failure.statusCode = 502;
+    failure.errorCode = "RANKING_SERVICE_FAILED";
+    throw failure;
+  }
   const data = await response.json();
-  const result = JSON.parse(data.choices?.[0]?.message?.content || "{}");
+  let result;
+  try {
+    result = JSON.parse(data.choices?.[0]?.message?.content || "{}");
+  } catch {
+    throw rankingFailure("Groq returned malformed ranking JSON.");
+  }
   if (!Array.isArray(result.ranking) || result.ranking.length !== candidates.length)
-    throw new Error("Groq returned an incomplete ranking.");
+    throw rankingFailure("Groq returned an incomplete ranking.");
   const expectedIds = new Set(candidates.map((candidate) => candidate.id));
   const returnedIds = new Set(result.ranking.map((item) => item.modelId));
   if (returnedIds.size !== expectedIds.size || [...expectedIds].some((id) => !returnedIds.has(id)))
-    throw new Error("Groq returned unknown or duplicate candidate IDs.");
-  const ranking = result.ranking.map((item, index) => {
-    const score = Number(item.score);
-    if (typeof item.capable !== "boolean" || !Number.isFinite(score) || score < 0 || score > 100 || !Array.isArray(item.breakdown))
-      throw new Error("Groq returned an invalid score breakdown.");
-    const weightTotal = item.breakdown.reduce((total, part) => total + Number(part.weight), 0);
-    if (!Number.isFinite(weightTotal) || Math.abs(weightTotal - 1) > 0.01)
-      throw new Error("Groq criterion weights do not total 1.");
+    throw rankingFailure("Groq returned unknown or duplicate candidate IDs.");
+  const ranking = result.ranking.map((item) => {
+    if (typeof item.capable !== "boolean" || !Array.isArray(item.breakdown) || !item.breakdown.length)
+      throw rankingFailure("Groq returned an invalid score breakdown.");
+    const breakdown = item.breakdown.map((part) => ({
+      ...part,
+      weight: Number(part.weight),
+      score: Number(part.score),
+    }));
+    if (breakdown.some((part) => !Number.isFinite(part.weight) || part.weight < 0 || !Number.isFinite(part.score) || part.score < 0 || part.score > 100))
+      throw rankingFailure("Groq returned invalid criterion values.");
+    const weightTotal = breakdown.reduce((total, part) => total + part.weight, 0);
+    if (!(weightTotal > 0)) throw rankingFailure("Groq returned zero criterion weight.");
+    const normalizedBreakdown = breakdown.map((part) => ({ ...part, weight: part.weight / weightTotal }));
+    const score = normalizedBreakdown.reduce((total, part) => total + part.weight * part.score, 0);
     const model = candidates.find((candidate) => candidate.id === item.modelId);
-    return { ...item, rank: index + 1, score, name: model.displayName, providerName: model.providerName };
-  });
-  if (ranking.some((item, index) => index && item.score > ranking[index - 1].score))
-    throw new Error("Groq ranking is not sorted by score.");
-  if (ranking.some((item, index) => item.capable && ranking.slice(0, index).some((earlier) => !earlier.capable)))
-    throw new Error("Groq ranked an incapable model above a capable model.");
-  const confidence = Number(result.confidence);
-  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1)
-    throw new Error("Groq returned invalid confidence.");
+    const facts = metadata.find((candidate) => candidate.id === item.modelId);
+    return {
+      ...item,
+      breakdown: normalizedBreakdown,
+      score,
+      name: model.displayName,
+      providerName: model.providerName,
+      estimatedInputCostUsd: facts.estimatedInputCostUsd,
+    };
+  }).sort((a, b) => {
+    if (a.capable !== b.capable) return Number(b.capable) - Number(a.capable);
+    const aHasCost = a.estimatedInputCostUsd != null;
+    const bHasCost = b.estimatedInputCostUsd != null;
+    if (aHasCost !== bHasCost) return Number(bHasCost) - Number(aHasCost);
+    if (aHasCost && a.estimatedInputCostUsd !== b.estimatedInputCostUsd)
+      return a.estimatedInputCostUsd - b.estimatedInputCostUsd;
+    return b.score - a.score;
+  }).map((item, index) => ({
+    ...item,
+    rank: index + 1,
+    selectionBasis: item.capable && item.estimatedInputCostUsd != null
+      ? "lowest-cost capable model"
+      : "task-fit evaluation",
+  }));
+  const evaluatorConfidence = Number(result.confidence);
+  if (!Number.isFinite(evaluatorConfidence) || evaluatorConfidence < 0 || evaluatorConfidence > 1)
+    throw rankingFailure("Groq returned invalid confidence.");
+  const winnerFacts = metadata.find((model) => model.id === ranking[0].modelId);
+  const metadataChecks = [
+    winnerFacts.openRouterModelId,
+    winnerFacts.description,
+    winnerFacts.contextLength,
+    winnerFacts.pricing?.prompt,
+  ];
+  const metadataCompleteness = metadataChecks.filter((value) => value != null).length / metadataChecks.length;
+  const confidence = Math.sqrt(evaluatorConfidence * metadataCompleteness);
   return {
     assessment: result.assessment && typeof result.assessment === "object" ? result.assessment : {},
     ranking,
     confidence,
-    confidenceReasons: Array.isArray(result.confidenceReasons) ? result.confidenceReasons : [],
+    confidenceReasons: [
+      ...(Array.isArray(result.confidenceReasons) ? result.confidenceReasons : []),
+      `Winner metadata completeness: ${Math.round(metadataCompleteness * 100)}%.`,
+    ],
     summary: String(result.summary || ""),
   };
 }
@@ -466,8 +615,8 @@ app.post("/api/v1/recommendations", auth, async (req, res, next) => {
       confidence = evaluated.confidence,
       inputTokens = estimateTokens(prompt),
       candidateCosts = candidates.map((model) => ({ model: model.displayName, usd: model.inputPricePerMillion == null ? null : inputTokens * model.inputPricePerMillion / 1000000 })),
-      recommendedCost = candidateCosts.find((item) => item.model === recommended.displayName)?.usd,
-      alternativeCost = alternative && candidateCosts.find((item) => item.model === alternative.displayName)?.usd,
+      recommendedCost = evaluated.ranking[0].estimatedInputCostUsd ?? candidateCosts.find((item) => item.model === recommended.displayName)?.usd,
+      alternativeCost = alternative && (evaluated.ranking[1]?.estimatedInputCostUsd ?? candidateCosts.find((item) => item.model === alternative.displayName)?.usd),
       estimatedSavingsUsd = recommendedCost == null || alternativeCost == null ? null : Math.max(0, alternativeCost - recommendedCost),
       reasons = evaluated.ranking[0].reasons || [],
       summary = evaluated.summary;
@@ -625,6 +774,9 @@ app.use((err, _req, res, _next) => {
   console.error(err);
   if (err?.code === 11000) {
     return error(res, 409, "DUPLICATE_RECORD", "This record already exists.");
+  }
+  if (err?.statusCode && err?.errorCode) {
+    return error(res, err.statusCode, err.errorCode, err.message);
   }
   return error(res, 500, "INTERNAL_SERVER_ERROR", "Something went wrong.");
 });
