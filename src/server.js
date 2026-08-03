@@ -245,6 +245,7 @@ app.post("/api/v1/models", auth, async (req, res, next) => {
       displayName,
       normalizedName: normalize(displayName),
       providerName: req.body.providerName || null,
+      openRouterModelId: req.body.openRouterModelId || null,
       inputPricePerMillion:
         req.body.inputPricePerMillion == null
           ? null
@@ -297,9 +298,42 @@ app.post("/api/v1/models/suggestions", auth, async (req, res, next) => {
       .slice(0, 5)
       .map((model) => ({
         displayName: model.name,
-        providerName: model.id.split("/")[0] || "Unknown",
-      }));
+      providerName: model.id.split("/")[0] || "Unknown",
+      openRouterModelId: model.id,
+    }));
     return ok(res, { suggestions });
+  } catch (error) {
+    next(error);
+  }
+});
+app.post("/api/v1/models/pricing", auth, async (req, res, next) => {
+  try {
+    const query = normalize(req.body.query);
+    const words = query.split(/\s+/).filter(Boolean);
+    const headers = {};
+    if (process.env.OPENROUTER_API_KEY && !process.env.OPENROUTER_API_KEY.startsWith("replace-")) {
+      headers.Authorization = `Bearer ${process.env.OPENROUTER_API_KEY}`;
+    }
+    const response = await fetch("https://openrouter.ai/api/v1/models", { headers });
+    if (!response.ok) {
+      return error(res, 502, "PRICING_LOOKUP_FAILED", `OpenRouter returned ${response.status}.`);
+    }
+    const data = await response.json();
+    const match = (data.data || []).find((model) => {
+      const text = normalize(`${model.name} ${model.id}`);
+      return words.every((word) => text.includes(word));
+    });
+    return ok(res, {
+      pricing: match?.pricing
+        ? {
+            inputPricePerMillion: Number(match.pricing.prompt) * 1000000,
+            outputPricePerMillion: Number(match.pricing.completion) * 1000000,
+            currency: "USD",
+            source: "OpenRouter",
+            modelId: match.id,
+          }
+        : null,
+    });
   } catch (error) {
     next(error);
   }
