@@ -17,13 +17,11 @@ import {
 } from "./persistence.js";
 import {
   assess,
-  choose,
-  estimateTokens,
-  fitsAssessment,
   maxPrompt,
   now,
   promptHash,
   rankModels,
+  recommendationConfidence,
   sanitize,
 } from "./lib/recommendations.js";
 
@@ -68,6 +66,11 @@ const normalize = (s) =>
   String(s || "")
     .trim()
     .toLowerCase();
+const optionalPrice = (value) => {
+  if (value === null || value === undefined || value === "") return null;
+  const price = Number(value);
+  return Number.isFinite(price) && price >= 0 ? price : Number.NaN;
+};
 const publicUser = (u) => ({ id: u.id, name: u.name, email: u.email });
 const userModels = (userId) => models.find({ userId });
 
@@ -231,8 +234,17 @@ app.get("/api/v1/models", auth, async (req, res, next) => {
 app.post("/api/v1/models", auth, async (req, res, next) => {
   try {
     const displayName = String(req.body.displayName || "").trim();
+    const inputPricePerMillion = optionalPrice(req.body.inputPricePerMillion);
+    const outputPricePerMillion = optionalPrice(req.body.outputPricePerMillion);
     if (!displayName)
       return error(res, 400, "VALIDATION_ERROR", "Model name is required.");
+    if (Number.isNaN(inputPricePerMillion) || Number.isNaN(outputPricePerMillion))
+      return error(
+        res,
+        400,
+        "VALIDATION_ERROR",
+        "Model prices must be non-negative numbers."
+      );
     if (
       (await userModels(req.user.id)).some(
         (m) => m.normalizedName === normalize(displayName)
@@ -246,14 +258,8 @@ app.post("/api/v1/models", auth, async (req, res, next) => {
       normalizedName: normalize(displayName),
       providerName: req.body.providerName || null,
       openRouterModelId: req.body.openRouterModelId || null,
-      inputPricePerMillion:
-        req.body.inputPricePerMillion == null
-          ? null
-          : Number(req.body.inputPricePerMillion),
-      outputPricePerMillion:
-        req.body.outputPricePerMillion == null
-          ? null
-          : Number(req.body.outputPricePerMillion),
+      inputPricePerMillion,
+      outputPricePerMillion,
       pricingCurrency: req.body.pricingCurrency || "USD",
       notes: req.body.notes || "",
       isActive: true,
@@ -366,57 +372,31 @@ app.post("/api/v1/recommendations", auth, async (req, res, next) => {
         "NO_ACTIVE_MODELS",
         "Select at least one active model."
       );
+    const rawContext =
+      req.body.context && typeof req.body.context === "object"
+        ? req.body.context
+        : {};
     const context = {
-      hasContext: Boolean(req.body.context?.hasContext),
-      contextType: req.body.context?.contextType || "none",
-      contextDetails: String(req.body.context?.contextDetails || "").slice(
-        0,
-        300
-      ),
-      ...req.body.context,
+      hasContext: Boolean(rawContext.hasContext),
+      contextType: String(rawContext.contextType || "none").slice(0, 40),
+      contextDetails: sanitize(String(rawContext.contextDetails || "")).slice(0, 300),
     };
     const assessment = assess(prompt, context),
-      fitCandidates = candidates.filter((model) =>
-        fitsAssessment(model, assessment)
-      ),
-      ranked = rankModels(candidates, assessment),
-      pricedCandidates = (fitCandidates.length ? fitCandidates : ranked).filter(
-        (model) => model.inputPricePerMillion != null
-      ),
-      recommended = pricedCandidates[0] || choose(candidates, assessment),
-      alternative =
-        pricedCandidates.find((model) => model.id !== recommended.id) ||
-        ranked.find((model) => model.id !== recommended.id) ||
-        null,
+      inputTokens = assessment.estimatedInputTokens,
+      scoredRanking = rankModels(candidates, assessment, { inputTokens }),
+      confidence = recommendationConfidence(scoredRanking, assessment),
+      ranking = scoredRanking.map(({ profileCertainty, ...model }) => model),
+      recommended = ranking[0],
+      alternative = ranking[1] || null,
       redacted = sanitize(prompt),
-      confidence = candidates.length === 1 ? 0.72 : 0.6,
-      inputTokens = estimateTokens(prompt),
-      recommendedCost =
-        candidates.find((m) => m.displayName === recommended.displayName)
-          ?.inputPricePerMillion == null
-          ? null
-          : (inputTokens *
-              candidates.find((m) => m.displayName === recommended.displayName)
-                .inputPricePerMillion) /
-            1000000,
-      alternativeCost =
-        alternative?.inputPricePerMillion == null
-          ? null
-          : (inputTokens * alternative.inputPricePerMillion) / 1000000,
+      recommendedCost = recommended.estimatedInputCostUsd,
+      alternativeCost = alternative?.estimatedInputCostUsd ?? null,
       estimatedSavingsUsd =
         recommendedCost == null || alternativeCost == null
           ? null
           : Math.max(0, alternativeCost - recommendedCost),
-      reasons = [
-        `${assessment.taskType.replaceAll("_", " ")} needs ${
-          assessment.reasoningRequirement
-        }-level reasoning.`,
-        "Fallback ranking balanced model capability and cost-efficiency.",
-        context.hasContext
-          ? "The supplied context metadata was included in the assessment."
-          : "No additional context was reported.",
-      ],
-      summary = `${recommended.displayName} is the best fit among the selected models.`;
+      reasons = recommended.reasons,
+      summary = `${recommended.displayName} ranked first with a ${recommended.score}/100 fit score for this ${assessment.taskType} task.`;
     const rec = await recommendations.create({
       id: id(),
       userId: req.user.id,
@@ -442,6 +422,7 @@ app.post("/api/v1/recommendations", auth, async (req, res, next) => {
         estimatedSavingsUsd,
         reasons,
         summary,
+        ranking,
       },
       feedback: null,
       createdAt: now(),
@@ -463,6 +444,7 @@ app.post("/api/v1/recommendations", auth, async (req, res, next) => {
         estimatedSavingsUsd,
         reasons,
         summary,
+        ranking,
       },
       201
     );
@@ -490,7 +472,18 @@ app.get("/api/v1/recommendations", auth, async (req, res, next) => {
 });
 app.get("/api/v1/usage", auth, async (req, res, next) => {
   try {
-    return ok(res, { count: 0, limit: 100, resetAt: now() });
+    const windowMs = 7 * 24 * 60 * 60 * 1000;
+    const cutoff = Date.now() - windowMs;
+    const recent = (await recommendations.find({ userId: req.user.id }))
+      .filter((item) => new Date(item.createdAt).getTime() >= cutoff)
+      .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+    return ok(res, {
+      count: recent.length,
+      limit: 100,
+      resetAt: recent.length
+        ? new Date(new Date(recent[0].createdAt).getTime() + windowMs).toISOString()
+        : null,
+    });
   } catch (e) {
     next(e);
   }

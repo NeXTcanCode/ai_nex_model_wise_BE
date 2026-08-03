@@ -10,7 +10,7 @@ Express + MongoDB backend for AI model recommender app.
 - Add, edit, enable, disable, delete models
 - Get model-name suggestions from OpenRouter
 - Run model recommendation from prompt + context
-- Rank models with local rules and Groq fallback
+- Rank models with transparent local fit scoring
 - Store recommendation history in MongoDB
 - Redact common secrets from prompts before storage
 - Track usage and feedback
@@ -23,7 +23,6 @@ Express + MongoDB backend for AI model recommender app.
 - CORS
 - Helmet
 - dotenv
-- Groq API
 - OpenRouter API
 
 ## Run locally
@@ -81,9 +80,9 @@ Base path: `/api/v1`
 
 1. Frontend sends prompt + selected model ids + context.
 2. Backend sanitizes prompt and hashes it.
-3. Backend scores models locally.
-4. Groq can rank as fallback/explanation path.
-5. Backend stores generic prompt + metadata + result.
+3. Backend assesses the task and scores every selected model.
+4. Backend derives confidence from the winning score, score separation, and assessment evidence.
+5. Backend returns and stores the ordered ranking, costs, and model-specific reasons.
 
 ## Storage
 
