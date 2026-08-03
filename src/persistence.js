@@ -2,9 +2,8 @@ import crypto from 'node:crypto';
 import User from './models/user.model.js';
 import UserModel from './models/user-model.model.js';
 import Recommendation from './models/recommendation.model.js';
-import Session from './models/session.model.js';
 
-export const memory = { users: [], models: [], recommendations: [], sessions: [] };
+export const memory = { users: [], models: [], recommendations: [] };
 let mongo = false;
 export const setPersistence = (value) => { mongo = value; };
 const id = () => crypto.randomUUID();
@@ -33,5 +32,4 @@ const collection = (Model, key) => ({
 export const users = collection(User, 'users');
 export const models = collection(UserModel, 'models');
 export const recommendations = collection(Recommendation, 'recommendations');
-export const sessions = collection(Session, 'sessions');
 export { id };
