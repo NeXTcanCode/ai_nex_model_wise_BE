@@ -17,13 +17,23 @@ import {
 const app = express();
 const port = Number(process.env.PORT || 5001);
 const sessions = new Map();
-const allowedOrigins = (process.env.FRONTEND_ORIGIN || "https://model-wise.netlify.app")
+const allowedOrigins = (process.env.FRONTEND_ORIGIN || "")
   .split(",")
-  .map((origin) => origin.trim())
+  .map((origin) => origin.trim().replace(/\/$/, ""))
   .filter(Boolean);
+// Keep the deployed frontend available even if Render still has the local
+// development value configured for FRONTEND_ORIGIN.
+for (const origin of [
+  "https://model-wise.netlify.app",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+]) {
+  if (!allowedOrigins.includes(origin)) allowedOrigins.push(origin);
+}
 const corsOptions = {
   origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+    if (!origin || allowedOrigins.includes(origin.replace(/\/$/, "")))
+      return callback(null, true);
     return callback(new Error("CORS origin not allowed"));
   },
   optionsSuccessStatus: 200,
