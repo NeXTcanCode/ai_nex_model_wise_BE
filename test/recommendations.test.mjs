@@ -212,4 +212,38 @@ test("recommendation API returns the winner, runner-up, confidence, and full ran
   assert.ok(data.ranking.every((model) => Number.isFinite(model.score)));
   assert.ok(data.ranking.every((model) => !("profileCertainty" in model)));
   assert.equal(data.contextDetails, "multiple files; [redacted]");
+
+  await new Promise((resolve) => setTimeout(resolve, 2));
+  const simpleResponse = await request("/api/v1/recommendations", {
+    method: "POST",
+    headers: { Authorization: authorization },
+    body: JSON.stringify({
+      prompt: "Write a short, friendly greeting.",
+      candidateModelIds: candidates.map((model) => model.id).reverse(),
+      context: {
+        hasContext: false,
+        contextType: "code",
+        contextDetails: complexCode,
+      },
+    }),
+  });
+  assert.equal(simpleResponse.status, 201);
+  assert.equal(simpleResponse.body.data.contextDetails, "");
+  assert.equal(simpleResponse.body.data.assessment.reasoningRequirement, "low");
+  assert.equal(simpleResponse.body.data.ranking[0].displayName, flash.displayName);
+  assert.notEqual(simpleResponse.body.data.confidence, data.confidence);
+
+  const history = await request("/api/v1/recommendations?limit=100", {
+    headers: { Authorization: authorization },
+  });
+  assert.equal(history.status, 200);
+  assert.equal(history.body.data.items.length, 2);
+  assert.equal(
+    history.body.data.items[0].result.recommendedModelName,
+    flash.displayName
+  );
+  assert.deepEqual(
+    history.body.data.items[0].result.ranking,
+    simpleResponse.body.data.ranking
+  );
 });

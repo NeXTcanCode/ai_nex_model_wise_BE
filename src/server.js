@@ -376,10 +376,15 @@ app.post("/api/v1/recommendations", auth, async (req, res, next) => {
       req.body.context && typeof req.body.context === "object"
         ? req.body.context
         : {};
+    const hasContext = Boolean(rawContext.hasContext);
     const context = {
-      hasContext: Boolean(rawContext.hasContext),
-      contextType: String(rawContext.contextType || "none").slice(0, 40),
-      contextDetails: sanitize(String(rawContext.contextDetails || "")).slice(0, 300),
+      hasContext,
+      contextType: hasContext
+        ? String(rawContext.contextType || "other").slice(0, 40)
+        : "none",
+      contextDetails: hasContext
+        ? sanitize(String(rawContext.contextDetails || "")).slice(0, 300)
+        : "",
     };
     const assessment = assess(prompt, context),
       inputTokens = assessment.estimatedInputTokens,
@@ -456,7 +461,9 @@ app.get("/api/v1/recommendations", auth, async (req, res, next) => {
   try {
     const page = Math.max(1, Number(req.query.page) || 1),
       limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20)),
-      all = await recommendations.find({ userId: req.user.id });
+      all = (await recommendations.find({ userId: req.user.id })).sort(
+        (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
+      );
     return ok(res, {
       items: all.slice((page - 1) * limit, page * limit).map(visibleRec),
       pagination: {
