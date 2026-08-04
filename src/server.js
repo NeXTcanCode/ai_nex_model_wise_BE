@@ -158,23 +158,6 @@ app.post("/api/v1/auth/register", async (req, res, next) => {
       passwordHash,
       createdAt: now(),
     });
-    for (const [displayName, providerName] of [
-      ["Claude Sonnet 4", "Anthropic"],
-      ["GPT-4.1", "OpenAI"],
-      ["Gemini 2.5 Pro", "Google"],
-    ])
-      await models.create({
-        id: id(),
-        userId: user.id,
-        displayName,
-        normalizedName: normalize(displayName),
-        providerName,
-        notes: "",
-        isActive: true,
-        source: "manual",
-        createdAt: now(),
-        updatedAt: now(),
-      });
     const token = signToken(user);
     setAuthCookie(res, token);
     return ok(res, authPayload(user, token), 201);
