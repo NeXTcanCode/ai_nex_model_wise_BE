@@ -295,6 +295,28 @@ app.post("/api/v1/models/suggestions", auth, async (req, res, next) => {
     next(error);
   }
 });
+app.get("/api/v1/models/catalog", auth, async (req, res, next) => {
+  try {
+    const headers = {};
+    if (process.env.OPENROUTER_API_KEY && !process.env.OPENROUTER_API_KEY.startsWith("replace-")) {
+      headers.Authorization = `Bearer ${process.env.OPENROUTER_API_KEY}`;
+    }
+    const response = await fetch("https://openrouter.ai/api/v1/models", { headers });
+    if (!response.ok)
+      return error(res, 502, "CATALOG_LOOKUP_FAILED", `OpenRouter returned ${response.status}.`);
+    const data = await response.json();
+    const models = (data.data || []).map((model) => ({
+      displayName: model.name || model.id,
+      providerName: model.id?.split("/")[0] || "Other",
+      openRouterModelId: model.id,
+      inputPricePerMillion: model.pricing?.prompt == null ? null : Number(model.pricing.prompt) * 1000000,
+      outputPricePerMillion: model.pricing?.completion == null ? null : Number(model.pricing.completion) * 1000000,
+    }));
+    return ok(res, { models });
+  } catch (e) {
+    next(e);
+  }
+});
 app.post("/api/v1/models/pricing", auth, async (req, res, next) => {
   try {
     const query = normalize(req.body.query);
