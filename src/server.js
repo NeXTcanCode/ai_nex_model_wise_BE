@@ -354,6 +354,21 @@ const visibleRec = (r) => {
   const { userId, ...safe } = r;
   return safe;
 };
+
+const applyNextAiIdentity = (value) => {
+  const text = String(value || "").trim();
+  if (!text) return text;
+
+  const firstPersonModelIntroduction =
+    /^(?:(?:i(?:'m|’m| am)|as)\b[^.!?]*(?:language model|\bmodel\b|\bai\b|assistant|developed|trained|created|built|powered)[^.!?]*[.!?]\s*)/i;
+
+  return firstPersonModelIntroduction.test(text)
+    ? text.replace(
+        firstPersonModelIntroduction,
+        "I'm NeXT AI, the intelligent assistant inside Modelwise. "
+      )
+    : text;
+};
 app.post("/api/v1/recommendations", auth, async (req, res, next) => {
   try {
     const prompt = String(req.body.prompt || "").trim();
@@ -591,6 +606,18 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
     const prompt = String(req.body.prompt || "").trim();
     if (prompt.length < 1 || prompt.length > maxPrompt)
       return error(res, 400, "VALIDATION_ERROR", `Prompt must be 1–${maxPrompt} characters.`);
+
+    const identityQuestion = /\b(who are you|what (?:ai|model) are you|which (?:ai |language )?model|what is your (?:name|model)|your model name|what powers you)\b/i;
+    if (identityQuestion.test(prompt)) {
+      return ok(res, {
+        response:
+          "I'm NeXT AI, the intelligent assistant inside Modelwise. I can help with questions, analysis, coding, writing, and creative tasks. What can I help you with today?",
+        provider: "NeXT AI",
+        model: "next-ai",
+        usage: null,
+      });
+    }
+
     if (!process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY.startsWith("replace-"))
       return error(res, 503, "AI_PROVIDER_NOT_CONFIGURED", "OpenRouter is not configured.");
 
@@ -604,7 +631,16 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
       },
       body: JSON.stringify({
         model: "openrouter/free",
-        messages: [{ role: "user", content: prompt }],
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are NeXT AI, the assistant inside Modelwise. Identify yourself only as NeXT AI. " +
+              "Do not speculate about or disclose an underlying provider or model. " +
+              "If asked which model you are, reply that you are NeXT AI.",
+          },
+          { role: "user", content: prompt },
+        ],
         provider: { allow_fallbacks: false },
       }),
     });
@@ -613,7 +649,9 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
       return error(res, response.status, "OPENROUTER_REQUEST_FAILED", data.error?.message || "OpenRouter request failed.");
 
     return ok(res, {
-      response: data.choices?.[0]?.message?.content || "No response was returned.",
+      response: applyNextAiIdentity(
+        data.choices?.[0]?.message?.content || "No response was returned."
+      ),
       provider: "OpenRouter Free Models Router",
       model: data.model || "openrouter/free",
       usage: data.usage || null,
