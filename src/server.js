@@ -586,6 +586,42 @@ app.delete("/api/v1/recommendations", auth, async (req, res, next) => {
     next(e);
   }
 });
+app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) => {
+  try {
+    const prompt = String(req.body.prompt || "").trim();
+    if (prompt.length < 1 || prompt.length > maxPrompt)
+      return error(res, 400, "VALIDATION_ERROR", `Prompt must be 1–${maxPrompt} characters.`);
+    if (!process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY.startsWith("replace-"))
+      return error(res, 503, "AI_PROVIDER_NOT_CONFIGURED", "OpenRouter is not configured.");
+
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": process.env.FRONTEND_ORIGIN || "http://localhost:5173",
+        "X-Title": "NeXT AI",
+      },
+      body: JSON.stringify({
+        model: "openrouter/free",
+        messages: [{ role: "user", content: prompt }],
+        provider: { allow_fallbacks: false },
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok)
+      return error(res, response.status, "OPENROUTER_REQUEST_FAILED", data.error?.message || "OpenRouter request failed.");
+
+    return ok(res, {
+      response: data.choices?.[0]?.message?.content || "No response was returned.",
+      provider: "OpenRouter Free Models Router",
+      model: data.model || "openrouter/free",
+      usage: data.usage || null,
+    });
+  } catch (e) {
+    next(e);
+  }
+});
 app.use((_req, res) => error(res, 404, "NOT_FOUND", "Route not found."));
 app.use((err, _req, res, _next) => {
   console.error(err);
