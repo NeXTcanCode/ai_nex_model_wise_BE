@@ -82,8 +82,8 @@ export const quotaError = ({ summary, estimatedInputTokens }) => {
     return `This prompt exceeds the ${USAGE_LIMITS.maxInputTokens.toLocaleString()} token input limit.`;
   if (summary.usedUnits + estimatedInputTokens > USAGE_LIMITS.weeklyUnits)
     return `Weekly usage limit reached: ${USAGE_LIMITS.weeklyUnits.toLocaleString()} weighted units. Your allowance resets automatically.`;
-  if (summary.dailyUsedUnits + estimatedInputTokens > USAGE_LIMITS.dailyUnits)
-    return `Daily usage limit reached: ${USAGE_LIMITS.dailyUnits.toLocaleString()} weighted units. Longer prompts and responses use more units.`;
+  // if (summary.dailyUsedUnits + estimatedInputTokens > USAGE_LIMITS.dailyUnits)
+  //   return `Daily usage limit reached: ${USAGE_LIMITS.dailyUnits.toLocaleString()} weighted units. Longer prompts and responses use more units.`;
   // if (summary.requestsThisMinute >= USAGE_LIMITS.requestsPerMinute)
   //   return `Message speed limit reached: up to ${USAGE_LIMITS.requestsPerMinute} messages per minute. Please wait a moment and try again.`;
   // if (summary.requestsToday >= USAGE_LIMITS.requestsPerDay)
