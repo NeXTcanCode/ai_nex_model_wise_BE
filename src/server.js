@@ -33,6 +33,7 @@ import {
   usageSummary,
   weightedUnits,
 } from "./lib/usage/quota.js";
+import { buildConversationContext } from "./lib/chat/conversation.js";
 
 const app = express();
 const port = Number(process.env.PORT || 5001);
@@ -618,7 +619,8 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
 
     const selectedOutputMode = outputMode(req.body.responseMode);
     const modeConfig = USAGE_LIMITS.outputModes[selectedOutputMode];
-    const estimatedInputTokens = estimateTokens(prompt);
+    const conversation = buildConversationContext(req.body.messages, prompt);
+    const estimatedInputTokens = conversation.estimatedInputTokens;
     const currentUsage = usageSummary(await usageEvents.find({ userId: req.user.id }));
     const limitMessage = quotaError({ summary: currentUsage, estimatedInputTokens });
     if (limitMessage)
@@ -645,7 +647,7 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
               "Do not speculate about or disclose an underlying provider or model. " +
               `If asked which model you are, reply that you are NeXT AI. ${modeConfig.instruction}`,
           },
-          { role: "user", content: prompt },
+          ...conversation.messages,
         ],
         max_tokens: modeConfig.maxOutputTokens,
         provider: { allow_fallbacks: false },
