@@ -45,6 +45,8 @@ const port = Number(process.env.PORT || 5001);
 const cookieName = "mw_token";
 const jwtSecret = process.env.JWT_SECRET || "change-me";
 const jwtExpiresIn = process.env.JWT_EXPIRES_IN || "7d";
+const nextAiUnavailableMessage =
+  "NeXT AI is temporarily unavailable. Please try again in a moment.";
 const allowedOrigins = [
   "https://model-wise.netlify.app",
   "http://localhost:5173",
@@ -667,14 +669,28 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
     };
 
     let { providerResponse, providerData: data } = await requestOpenRouter();
-    if (!providerResponse.ok)
-      return error(res, providerResponse.status, "OPENROUTER_REQUEST_FAILED", data.error?.message || "OpenRouter request failed.");
+    if (!providerResponse.ok) {
+      console.error("OpenRouter chat request failed:", data.error || data);
+      return error(
+        res,
+        providerResponse.status,
+        "OPENROUTER_REQUEST_FAILED",
+        nextAiUnavailableMessage
+      );
+    }
 
     let responseContent = data.choices?.[0]?.message?.content || "";
     if (isSafetyClassificationOnly(responseContent)) {
       ({ providerResponse, providerData: data } = await requestOpenRouter(true));
-      if (!providerResponse.ok)
-        return error(res, providerResponse.status, "OPENROUTER_REQUEST_FAILED", data.error?.message || "OpenRouter retry failed.");
+      if (!providerResponse.ok) {
+        console.error("OpenRouter chat retry failed:", data.error || data);
+        return error(
+          res,
+          providerResponse.status,
+          "OPENROUTER_REQUEST_FAILED",
+          nextAiUnavailableMessage
+        );
+      }
       responseContent = data.choices?.[0]?.message?.content || "";
     }
 
