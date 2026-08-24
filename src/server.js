@@ -668,12 +668,32 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
       return { providerResponse, providerData };
     };
 
-    let { providerResponse, providerData: data } = await requestOpenRouter();
+    const retryTransientProviderFailure = async (result) => {
+      const status = result.providerResponse.status;
+      if (status !== 429 && status < 500) return result;
+
+      const retryAfter = Number(
+        result.providerResponse.headers.get("retry-after") || 0
+      );
+      const retryDelayMs = Number.isFinite(retryAfter)
+        ? Math.min(2000, Math.max(0, retryAfter * 1000))
+        : 0;
+      if (retryDelayMs) {
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+      }
+      return requestOpenRouter(true);
+    };
+
+    let providerResult = await requestOpenRouter();
+    if (!providerResult.providerResponse.ok) {
+      providerResult = await retryTransientProviderFailure(providerResult);
+    }
+    let { providerResponse, providerData: data } = providerResult;
     if (!providerResponse.ok) {
       console.error("OpenRouter chat request failed:", data.error || data);
       return error(
         res,
-        providerResponse.status,
+        503,
         "OPENROUTER_REQUEST_FAILED",
         nextAiUnavailableMessage
       );
@@ -686,7 +706,7 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
         console.error("OpenRouter chat retry failed:", data.error || data);
         return error(
           res,
-          providerResponse.status,
+          503,
           "OPENROUTER_REQUEST_FAILED",
           nextAiUnavailableMessage
         );
