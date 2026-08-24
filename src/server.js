@@ -11,6 +11,7 @@ import {
   users,
   models,
   recommendations,
+  usageEvents,
   memory,
   setPersistence,
   id,
@@ -24,6 +25,14 @@ import {
   recommendationConfidence,
   sanitize,
 } from "./lib/recommendations.js";
+import {
+  USAGE_LIMITS,
+  estimateTokens,
+  outputMode,
+  quotaError,
+  usageSummary,
+  weightedUnits,
+} from "./lib/usage/quota.js";
 
 const app = express();
 const port = Number(process.env.PORT || 5001);
@@ -499,18 +508,7 @@ app.get("/api/v1/recommendations", auth, async (req, res, next) => {
 });
 app.get("/api/v1/usage", auth, async (req, res, next) => {
   try {
-    const windowMs = 7 * 24 * 60 * 60 * 1000;
-    const cutoff = Date.now() - windowMs;
-    const recent = (await recommendations.find({ userId: req.user.id }))
-      .filter((item) => new Date(item.createdAt).getTime() >= cutoff)
-      .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-    return ok(res, {
-      count: recent.length,
-      limit: 100,
-      resetAt: recent.length
-        ? new Date(new Date(recent[0].createdAt).getTime() + windowMs).toISOString()
-        : null,
-    });
+    return ok(res, usageSummary(await usageEvents.find({ userId: req.user.id })));
   } catch (e) {
     next(e);
   }
@@ -618,6 +616,14 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
       });
     }
 
+    const selectedOutputMode = outputMode(req.body.responseMode);
+    const modeConfig = USAGE_LIMITS.outputModes[selectedOutputMode];
+    const estimatedInputTokens = estimateTokens(prompt);
+    const currentUsage = usageSummary(await usageEvents.find({ userId: req.user.id }));
+    const limitMessage = quotaError({ summary: currentUsage, estimatedInputTokens });
+    if (limitMessage)
+      return error(res, 429, "USAGE_LIMIT_REACHED", limitMessage, [{ usage: currentUsage }]);
+
     if (!process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY.startsWith("replace-"))
       return error(res, 503, "AI_PROVIDER_NOT_CONFIGURED", "OpenRouter is not configured.");
 
@@ -637,16 +643,36 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
             content:
               "You are NeXT AI, the assistant inside Modelwise. Identify yourself only as NeXT AI. " +
               "Do not speculate about or disclose an underlying provider or model. " +
-              "If asked which model you are, reply that you are NeXT AI.",
+              `If asked which model you are, reply that you are NeXT AI. ${modeConfig.instruction}`,
           },
           { role: "user", content: prompt },
         ],
+        max_tokens: modeConfig.maxOutputTokens,
         provider: { allow_fallbacks: false },
       }),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok)
       return error(res, response.status, "OPENROUTER_REQUEST_FAILED", data.error?.message || "OpenRouter request failed.");
+
+    const providerInputTokens = Number(data.usage?.prompt_tokens);
+    const providerOutputTokens = Number(data.usage?.completion_tokens);
+    const inputTokens = Number.isFinite(providerInputTokens)
+      ? providerInputTokens
+      : estimatedInputTokens;
+    const outputTokens = Number.isFinite(providerOutputTokens)
+      ? providerOutputTokens
+      : estimateTokens(data.choices?.[0]?.message?.content || "");
+    await usageEvents.create({
+      userId: req.user.id,
+      inputTokens,
+      outputTokens,
+      weightedUnits: weightedUnits(inputTokens, outputTokens),
+      responseMode: selectedOutputMode,
+      providerReported: Number.isFinite(providerInputTokens) && Number.isFinite(providerOutputTokens),
+      createdAt: now(),
+    });
+    const updatedUsage = usageSummary(await usageEvents.find({ userId: req.user.id }));
 
     return ok(res, {
       response: applyNextAiIdentity(
@@ -655,6 +681,7 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
       provider: "OpenRouter Free Models Router",
       model: data.model || "openrouter/free",
       usage: data.usage || null,
+      quota: updatedUsage,
     });
   } catch (e) {
     next(e);
