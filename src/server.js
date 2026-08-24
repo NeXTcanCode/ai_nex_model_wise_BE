@@ -34,6 +34,11 @@ import {
   weightedUnits,
 } from "./lib/usage/quota.js";
 import { buildConversationContext } from "./lib/chat/conversation.js";
+import {
+  isSafetyClassificationOnly,
+  NEXT_AI_RESPONSE_FALLBACK,
+  NEXT_AI_RETRY_INSTRUCTION,
+} from "./lib/chat/response-validation.js";
 
 const app = express();
 const port = Number(process.env.PORT || 5001);
@@ -629,33 +634,53 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
     if (!process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY.startsWith("replace-"))
       return error(res, 503, "AI_PROVIDER_NOT_CONFIGURED", "OpenRouter is not configured.");
 
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": process.env.FRONTEND_ORIGIN || "http://localhost:5173",
-        "X-Title": "NeXT AI",
-      },
-      body: JSON.stringify({
-        model: "openrouter/free",
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are NeXT AI, the assistant inside Modelwise. Identify yourself only as NeXT AI. " +
-              "Do not speculate about or disclose an underlying provider or model. " +
-              `If asked which model you are, reply that you are NeXT AI. ${modeConfig.instruction}`,
-          },
-          ...conversation.messages,
-        ],
-        max_tokens: modeConfig.maxOutputTokens,
-        provider: { allow_fallbacks: false },
-      }),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok)
-      return error(res, response.status, "OPENROUTER_REQUEST_FAILED", data.error?.message || "OpenRouter request failed.");
+    const requestOpenRouter = async (isRetry = false) => {
+      const providerResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": process.env.FRONTEND_ORIGIN || "http://localhost:5173",
+          "X-Title": "NeXT AI",
+        },
+        body: JSON.stringify({
+          model: "openrouter/free",
+          messages: [
+            {
+              role: "system",
+              content:
+                "You are NeXT AI, the assistant inside Modelwise. Identify yourself only as NeXT AI. " +
+                "Do not speculate about or disclose an underlying provider or model. " +
+                `If asked which model you are, reply that you are NeXT AI. ${modeConfig.instruction}`,
+            },
+            ...(isRetry
+              ? [{ role: "system", content: NEXT_AI_RETRY_INSTRUCTION }]
+              : []),
+            ...conversation.messages,
+          ],
+          max_tokens: modeConfig.maxOutputTokens,
+          provider: { allow_fallbacks: false },
+        }),
+      });
+      const providerData = await providerResponse.json().catch(() => ({}));
+      return { providerResponse, providerData };
+    };
+
+    let { providerResponse, providerData: data } = await requestOpenRouter();
+    if (!providerResponse.ok)
+      return error(res, providerResponse.status, "OPENROUTER_REQUEST_FAILED", data.error?.message || "OpenRouter request failed.");
+
+    let responseContent = data.choices?.[0]?.message?.content || "";
+    if (isSafetyClassificationOnly(responseContent)) {
+      ({ providerResponse, providerData: data } = await requestOpenRouter(true));
+      if (!providerResponse.ok)
+        return error(res, providerResponse.status, "OPENROUTER_REQUEST_FAILED", data.error?.message || "OpenRouter retry failed.");
+      responseContent = data.choices?.[0]?.message?.content || "";
+    }
+
+    const finalResponse = isSafetyClassificationOnly(responseContent)
+      ? NEXT_AI_RESPONSE_FALLBACK
+      : responseContent || NEXT_AI_RESPONSE_FALLBACK;
 
     const providerInputTokens = Number(data.usage?.prompt_tokens);
     const providerOutputTokens = Number(data.usage?.completion_tokens);
@@ -664,7 +689,7 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
       : estimatedInputTokens;
     const outputTokens = Number.isFinite(providerOutputTokens)
       ? providerOutputTokens
-      : estimateTokens(data.choices?.[0]?.message?.content || "");
+      : estimateTokens(finalResponse);
     await usageEvents.create({
       userId: req.user.id,
       inputTokens,
@@ -678,7 +703,7 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
 
     return ok(res, {
       response: applyNextAiIdentity(
-        data.choices?.[0]?.message?.content || "No response was returned."
+        finalResponse
       ),
       provider: "OpenRouter Free Models Router",
       model: data.model || "openrouter/free",
