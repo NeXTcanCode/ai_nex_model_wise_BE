@@ -39,6 +39,12 @@ import {
   NEXT_AI_RESPONSE_FALLBACK,
   NEXT_AI_RETRY_INSTRUCTION,
 } from "./lib/chat/response-validation.js";
+import {
+  analyzeImage,
+  discardUploadedImage,
+  ImageChatError,
+  imageUpload,
+} from "./lib/chat/image-chat.js";
 
 const app = express();
 const port = Number(process.env.PORT || 5001);
@@ -628,10 +634,23 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
     const modeConfig = USAGE_LIMITS.outputModes[selectedOutputMode];
     const conversation = buildConversationContext(req.body.messages, prompt);
     const estimatedInputTokens = conversation.estimatedInputTokens;
-    const currentUsage = usageSummary(await usageEvents.find({ userId: req.user.id }));
-    const limitMessage = quotaError({ summary: currentUsage, estimatedInputTokens });
-    if (limitMessage)
-      return error(res, 429, "USAGE_LIMIT_REACHED", limitMessage, [{ usage: currentUsage }]);
+
+    // QUOTA ENFORCEMENT TEMPORARILY DISABLED
+    // Keep usage calculation and UsageEvent persistence active so limits can be
+    // restored later with real usage data. Uncomment this block to re-enable
+    // the rules configured in src/lib/usage/quota.js.
+    // const currentUsage = usageSummary(
+    //   await usageEvents.find({ userId: req.user.id })
+    // );
+    // const limitMessage = quotaError({
+    //   summary: currentUsage,
+    //   estimatedInputTokens,
+    // });
+    // if (limitMessage) {
+    //   return error(res, 429, "USAGE_LIMIT_REACHED", limitMessage, [
+    //     { usage: currentUsage },
+    //   ]);
+    // }
 
     if (!process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY.startsWith("replace-"))
       return error(res, 503, "AI_PROVIDER_NOT_CONFIGURED", "OpenRouter is not configured.");
@@ -750,6 +769,119 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
     next(e);
   }
 });
+
+const uploadSingleChatImage = (req, res, next) => {
+  imageUpload.single("image")(req, res, (uploadError) => {
+    if (!uploadError) return next();
+    if (uploadError.code === "LIMIT_FILE_SIZE") {
+      return error(
+        res,
+        413,
+        "IMAGE_TOO_LARGE",
+        "Choose an image smaller than 5 MB."
+      );
+    }
+    if (uploadError instanceof ImageChatError) {
+      return error(
+        res,
+        uploadError.status,
+        uploadError.code,
+        uploadError.message
+      );
+    }
+    return error(res, 400, "IMAGE_UPLOAD_FAILED", "Could not upload the image.");
+  });
+};
+
+app.post(
+  "/api/v1/chat/image",
+  auth,
+  uploadSingleChatImage,
+  async (req, res, next) => {
+    try {
+      const prompt = String(req.body.prompt || "").trim() || "Describe this image.";
+      if (prompt.length > maxPrompt) {
+        discardUploadedImage(req.file);
+        return error(
+          res,
+          400,
+          "VALIDATION_ERROR",
+          `Prompt must be no more than ${maxPrompt} characters.`
+        );
+      }
+      if (!process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY.startsWith("replace-")) {
+        discardUploadedImage(req.file);
+        return error(
+          res,
+          503,
+          "AI_PROVIDER_NOT_CONFIGURED",
+          "OpenRouter is not configured."
+        );
+      }
+
+      let incomingMessages = [];
+      try {
+        incomingMessages = JSON.parse(req.body.messages || "[]");
+      } catch {
+        discardUploadedImage(req.file);
+        return error(res, 400, "VALIDATION_ERROR", "Conversation messages are invalid.");
+      }
+
+      const selectedOutputMode = outputMode(req.body.responseMode);
+      const modeConfig = USAGE_LIMITS.outputModes[selectedOutputMode];
+      const conversation = buildConversationContext(incomingMessages, prompt);
+      const result = await analyzeImage({
+        file: req.file,
+        prompt,
+        conversationMessages: conversation.messages,
+        modeConfig,
+        apiKey: process.env.OPENROUTER_API_KEY,
+        referer: process.env.FRONTEND_ORIGIN || "http://localhost:5173",
+      });
+
+      const providerInputTokens = Number(result.usage?.prompt_tokens);
+      const providerOutputTokens = Number(result.usage?.completion_tokens);
+      const inputTokens = Number.isFinite(providerInputTokens)
+        ? providerInputTokens
+        : conversation.estimatedInputTokens;
+      const outputTokens = Number.isFinite(providerOutputTokens)
+        ? providerOutputTokens
+        : estimateTokens(result.response);
+      await usageEvents.create({
+        userId: req.user.id,
+        inputTokens,
+        outputTokens,
+        weightedUnits: weightedUnits(inputTokens, outputTokens),
+        responseMode: selectedOutputMode,
+        providerReported:
+          Number.isFinite(providerInputTokens) &&
+          Number.isFinite(providerOutputTokens),
+        createdAt: now(),
+      });
+      const updatedUsage = usageSummary(
+        await usageEvents.find({ userId: req.user.id })
+      );
+
+      return ok(res, {
+        response: applyNextAiIdentity(result.response),
+        provider: "NeXT AI Vision",
+        model: result.model,
+        usage: result.usage,
+        quota: updatedUsage,
+      });
+    } catch (imageError) {
+      if (imageError instanceof ImageChatError) {
+        return error(
+          res,
+          imageError.status,
+          imageError.code,
+          imageError.message
+        );
+      }
+      next(imageError);
+    }
+  }
+);
 app.use((_req, res) => error(res, 404, "NOT_FOUND", "Route not found."));
 app.use((err, _req, res, _next) => {
   console.error(err);
