@@ -53,6 +53,9 @@ const jwtSecret = process.env.JWT_SECRET || "change-me";
 const jwtExpiresIn = process.env.JWT_EXPIRES_IN || "7d";
 const nextAiUnavailableMessage =
   "NeXT AI is temporarily unavailable. Please try again in a moment.";
+// IMAGE CHAT TEMPORARILY DISABLED.
+// Change this to true to restore POST /api/v1/chat/image.
+const imageChatEnabled = false;
 const allowedOrigins = [
   "https://model-wise.netlify.app",
   "http://localhost:5173",
@@ -793,9 +796,20 @@ const uploadSingleChatImage = (req, res, next) => {
   });
 };
 
+const requireImageChatEnabled = (_req, res, next) => {
+  if (imageChatEnabled) return next();
+  return error(
+    res,
+    404,
+    "IMAGE_CHAT_DISABLED",
+    "Image conversations are not currently available."
+  );
+};
+
 app.post(
   "/api/v1/chat/image",
   auth,
+  requireImageChatEnabled,
   uploadSingleChatImage,
   async (req, res, next) => {
     try {
