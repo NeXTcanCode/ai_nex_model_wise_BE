@@ -626,7 +626,7 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
     if (identityQuestion.test(prompt)) {
       return ok(res, {
         response:
-          "I'm NeXT AI, the intelligent assistant inside Modelwise. I can help with questions, analysis, coding, writing, and creative tasks. What can I help you with today?",
+          "I'm NeXT AI, the AI assistant created by Vikas Sinha under the NeXT brand and available through Modelwise. I can help with questions, analysis, coding, writing, and creative tasks. What can I help you with today?",
         provider: "NeXT AI",
         model: "next-ai",
         usage: null,
@@ -635,6 +635,14 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
 
     const selectedOutputMode = outputMode(req.body.responseMode);
     const modeConfig = USAGE_LIMITS.outputModes[selectedOutputMode];
+    const answerStyle = ["standard", "structured", "code-only"].includes(req.body.answerStyle)
+      ? req.body.answerStyle
+      : "standard";
+    const answerStyleInstruction = {
+      standard: "",
+      structured: "Use clear sections such as Summary, Details, and Next steps when helpful.",
+      "code-only": "For coding requests, return only the necessary code and minimal inline comments.",
+    }[answerStyle];
     const conversation = buildConversationContext(req.body.messages, prompt);
     const estimatedInputTokens = conversation.estimatedInputTokens;
 
@@ -673,9 +681,11 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
             {
               role: "system",
               content:
-                "You are NeXT AI, the assistant inside Modelwise. Identify yourself only as NeXT AI. " +
+                "You are NeXT AI, the assistant inside Modelwise. " +
+                "NeXT AI is the AI assistant created by Vikas Sinha under the NeXT brand and available through Modelwise. " +
+                "Identify yourself only as NeXT AI. " +
                 "Do not speculate about or disclose an underlying provider or model. " +
-                `If asked which model you are, reply that you are NeXT AI. ${modeConfig.instruction}`,
+                `If asked which model you are, reply that you are NeXT AI. ${modeConfig.instruction} ${answerStyleInstruction}`,
             },
             ...(isRetry
               ? [{ role: "system", content: NEXT_AI_RETRY_INSTRUCTION }]

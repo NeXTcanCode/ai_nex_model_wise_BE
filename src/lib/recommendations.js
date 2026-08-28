@@ -207,21 +207,23 @@ const reasonsFor = (model, profile, assessment, scoreParts, costPosition) => {
   const reasons = [];
   const required = requirementTier[assessment.reasoningRequirement] || requirementTier.medium;
   if (assessment.goalClarity === "implicit")
-    reasons.push("The prompt has no clear instruction, so recommendation confidence is capped.");
+    reasons.push(
+      "This is a broad prompt, so the ranking is a best-effort estimate rather than a task-specific match."
+    );
   if (profile.tier + 0.2 >= required) {
     reasons.push(
-      `Its inferred capability tier fits the ${assessment.reasoningRequirement}-reasoning requirement.`
+      `Its name and available metadata suggest capability suitable for ${assessment.reasoningRequirement}-reasoning work.`
     );
   } else {
     reasons.push(
-      `Its inferred capability tier may be limiting for ${assessment.reasoningRequirement}-reasoning work.`
+      `The available model metadata does not strongly support ${assessment.reasoningRequirement}-reasoning work.`
     );
   }
   if (assessment.taskType === "coding") {
     reasons.push(
       profile.codeSpecialist
-        ? "Its model family indicates a coding-oriented strength."
-        : "Its general capability is being relied on for this coding task."
+        ? "Its model name suggests a coding-oriented strength for this software task."
+        : "No coding-specific metadata was found, so its general capability is being used for this software task."
     );
   } else if (profile.lightweight) {
     reasons.push("Its lightweight variant is suitable when speed and cost matter.");
@@ -235,9 +237,9 @@ const reasonsFor = (model, profile, assessment, scoreParts, costPosition) => {
   if (assessment.contextRequirement === "large" && profile.lightweight)
     reasons.push("A lightweight variant is penalized for the larger supplied prompt.");
   if (costPosition >= 0.8) reasons.push("It has one of the lowest known input prices in this shortlist.");
-  else if (!modelHasPrice(model)) reasons.push("Pricing is unknown, so cost efficiency has lower certainty.");
+  else if (!modelHasPrice(model)) reasons.push("Pricing is unavailable, so the cost comparison is incomplete.");
   if (profile.certainty < 0.6)
-    reasons.push("Capability metadata is limited, which reduces confidence in this score.");
+    reasons.push("Capability metadata is limited, so this score should be treated as a heuristic.");
 
   return reasons.slice(0, 3);
 };
