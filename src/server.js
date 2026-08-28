@@ -643,6 +643,16 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
       structured: "Use clear sections such as Summary, Details, and Next steps when helpful.",
       "code-only": "For coding requests, return only the necessary code and minimal inline comments.",
     }[answerStyle];
+    const coderTask = ["debug", "build", "review", "refactor", "test"].includes(req.body.coderTask)
+      ? req.body.coderTask
+      : null;
+    const coderTaskInstruction = {
+      debug: "Focus on diagnosis, root cause, a concrete fix, and verification steps.",
+      build: "Focus on an implementation plan, affected components, working code, and verification.",
+      review: "Review for correctness, security, performance, and maintainability; prioritize actionable findings.",
+      refactor: "Improve structure and maintainability while preserving behavior; explain important trade-offs.",
+      test: "Focus on unit, integration, and edge-case tests, including how to run and verify them.",
+    }[coderTask] || "";
     const conversation = buildConversationContext(req.body.messages, prompt);
     const estimatedInputTokens = conversation.estimatedInputTokens;
 
@@ -685,7 +695,7 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
                 "NeXT AI is the AI assistant created by Vikas Sinha under the NeXT brand and available through Modelwise. " +
                 "Identify yourself only as NeXT AI. " +
                 "Do not speculate about or disclose an underlying provider or model. " +
-                `If asked which model you are, reply that you are NeXT AI. ${modeConfig.instruction} ${answerStyleInstruction}`,
+                `If asked which model you are, reply that you are NeXT AI. ${modeConfig.instruction} ${answerStyleInstruction} ${coderTaskInstruction}`,
             },
             ...(isRetry
               ? [{ role: "system", content: NEXT_AI_RETRY_INSTRUCTION }]
