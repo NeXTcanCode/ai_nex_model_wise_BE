@@ -695,14 +695,13 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
                 "NeXT AI is the AI assistant created by Vikas Sinha under the NeXT brand and available through Modelwise. " +
                 "Identify yourself only as NeXT AI. " +
                 "Do not speculate about or disclose an underlying provider or model. " +
-                `If asked which model you are, reply that you are NeXT AI. ${modeConfig.instruction} ${answerStyleInstruction} ${coderTaskInstruction}`,
+                `If asked which model you are, reply that you are NeXT AI. ${answerStyleInstruction} ${coderTaskInstruction}`,
             },
             ...(isRetry
               ? [{ role: "system", content: NEXT_AI_RETRY_INSTRUCTION }]
               : []),
             ...conversation.messages,
           ],
-          max_tokens: modeConfig.maxOutputTokens,
           provider: { allow_fallbacks: false },
         }),
       });

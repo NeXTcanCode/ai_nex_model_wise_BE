@@ -109,7 +109,7 @@ export const analyzeImage = async ({
             content:
               "You are NeXT AI, the image-capable assistant inside Modelwise. " +
               "Analyze the supplied image and answer the user's request directly. " +
-              `Identify yourself only as NeXT AI. ${modeConfig.instruction}`,
+              "Identify yourself only as NeXT AI.",
           },
           ...(isRetry
             ? [{ role: "system", content: NEXT_AI_RETRY_INSTRUCTION }]
@@ -123,7 +123,6 @@ export const analyzeImage = async ({
             ],
           },
         ],
-        max_tokens: modeConfig.maxOutputTokens,
         provider: { allow_fallbacks: true },
       }),
     });
