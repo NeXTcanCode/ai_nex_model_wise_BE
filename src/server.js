@@ -12,6 +12,7 @@ import {
   models,
   recommendations,
   usageEvents,
+  conversations,
   memory,
   setPersistence,
   id,
@@ -99,6 +100,10 @@ const optionalPrice = (value) => {
 };
 const publicUser = (u) => ({ id: u.id, name: u.name, email: u.email });
 const userModels = (userId) => models.find({ userId });
+const chatTitle = (prompt) => {
+  const value = String(prompt || '').trim().replace(/\s+/g, ' ');
+  return value.length > 60 ? `${value.slice(0, 57)}…` : value || 'New chat';
+};
 
 const signToken = (user) =>
   jwt.sign({ sub: user.id }, jwtSecret, { expiresIn: jwtExpiresIn });
@@ -381,6 +386,44 @@ const visibleRec = (r) => {
   return safe;
 };
 
+app.post('/api/v1/chats', auth, async (req, res, next) => {
+  try {
+    const chat = await conversations.create({ id: id(), userId: req.user.id, title: chatTitle(req.body.title), messages: [], preview: '', createdAt: now(), updatedAt: now() });
+    return ok(res, { chat }, 201);
+  } catch (e) { next(e); }
+});
+app.get('/api/v1/chats', auth, async (req, res, next) => {
+  try {
+    const chats = (await conversations.find({ userId: req.user.id })).sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)).map(({ messages, ...chat }) => ({ ...chat, messageCount: messages?.length || 0 }));
+    return ok(res, { chats });
+  } catch (e) { next(e); }
+});
+app.get('/api/v1/chats/:chatId', auth, async (req, res, next) => {
+  try {
+    const chat = await conversations.findOne({ id: req.params.chatId, userId: req.user.id });
+    if (!chat) return error(res, 404, 'CHAT_NOT_FOUND', 'Chat not found.');
+    return ok(res, { chat });
+  } catch (e) { next(e); }
+});
+app.patch('/api/v1/chats/:chatId', auth, async (req, res, next) => {
+  try {
+    const chat = await conversations.findOne({ id: req.params.chatId, userId: req.user.id });
+    if (!chat) return error(res, 404, 'CHAT_NOT_FOUND', 'Chat not found.');
+    const title = String(req.body.title || '').trim();
+    if (!title) return error(res, 400, 'VALIDATION_ERROR', 'Chat title is required.');
+    chat.title = title.slice(0, 120); chat.updatedAt = now();
+    await conversations.updateOne({ id: chat.id, userId: req.user.id }, { $set: { title: chat.title, updatedAt: chat.updatedAt } });
+    return ok(res, { chat });
+  } catch (e) { next(e); }
+});
+app.delete('/api/v1/chats/:chatId', auth, async (req, res, next) => {
+  try {
+    const deleted = await conversations.deleteOne({ id: req.params.chatId, userId: req.user.id });
+    if (!deleted) return error(res, 404, 'CHAT_NOT_FOUND', 'Chat not found.');
+    return ok(res, { deleted: true });
+  } catch (e) { next(e); }
+});
+
 const applyNextAiIdentity = (value) => {
   const text = String(value || "").trim();
   if (!text) return text;
@@ -622,6 +665,13 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
     if (prompt.length < 1 || prompt.length > maxPrompt)
       return error(res, 400, "VALIDATION_ERROR", `Prompt must be 1–${maxPrompt} characters.`);
 
+    const conversationId = String(req.body.conversationId || '').trim() || null;
+    const conversationRecord = conversationId
+      ? await conversations.findOne({ id: conversationId, userId: req.user.id })
+      : null;
+    if (conversationId && !conversationRecord)
+      return error(res, 404, 'CHAT_NOT_FOUND', 'Chat not found.');
+
     const identityQuestion = /\b(who are you|what (?:ai|model) are you|which (?:ai |language )?model|what is your (?:name|model)|your model name|what powers you)\b/i;
     if (identityQuestion.test(prompt)) {
       return ok(res, {
@@ -777,6 +827,22 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
       createdAt: now(),
     });
     const updatedUsage = usageSummary(await usageEvents.find({ userId: req.user.id }));
+
+    if (conversationRecord) {
+      const timestamp = now();
+      const nextTitle = conversationRecord.title === 'New chat'
+        ? chatTitle(prompt)
+        : conversationRecord.title;
+      const persistedMessages = [
+        ...(conversationRecord.messages || []),
+        { id: id(), role: 'user', content: prompt, createdAt: timestamp, usage: null },
+        { id: id(), role: 'assistant', content: finalResponse, createdAt: timestamp, usage: data.usage || null },
+      ];
+      await conversations.updateOne(
+        { id: conversationRecord.id, userId: req.user.id },
+        { $set: { title: nextTitle, messages: persistedMessages, preview: finalResponse.slice(0, 160), updatedAt: timestamp } }
+      );
+    }
 
     return ok(res, {
       response: applyNextAiIdentity(
