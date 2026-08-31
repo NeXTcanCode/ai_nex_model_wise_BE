@@ -13,6 +13,7 @@ import {
   recommendations,
   usageEvents,
   conversations,
+  skills,
   memory,
   setPersistence,
   id,
@@ -104,6 +105,7 @@ const chatTitle = (prompt) => {
   const value = String(prompt || '').trim().replace(/\s+/g, ' ');
   return value.length > 60 ? `${value.slice(0, 57)}…` : value || 'New chat';
 };
+const skillSlug = (name) => normalize(name).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || `skill-${id().slice(0, 8)}`;
 
 const signToken = (user) =>
   jwt.sign({ sub: user.id }, jwtSecret, { expiresIn: jwtExpiresIn });
@@ -420,6 +422,52 @@ app.delete('/api/v1/chats/:chatId', auth, async (req, res, next) => {
   try {
     const deleted = await conversations.deleteOne({ id: req.params.chatId, userId: req.user.id });
     if (!deleted) return error(res, 404, 'CHAT_NOT_FOUND', 'Chat not found.');
+    return ok(res, { deleted: true });
+  } catch (e) { next(e); }
+});
+
+app.get('/api/v1/skills', auth, async (req, res, next) => {
+  try {
+    const records = (await skills.find({ userId: req.user.id })).sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+    return ok(res, { skills: records });
+  } catch (e) { next(e); }
+});
+app.post('/api/v1/skills', auth, async (req, res, next) => {
+  try {
+    const name = String(req.body.name || '').trim();
+    const markdown = String(req.body.markdown || '').trim();
+    if (!name || !markdown) return error(res, 400, 'VALIDATION_ERROR', 'Skill name and Markdown are required.');
+    const skill = await skills.create({ id: id(), userId: req.user.id, slug: skillSlug(name), name: name.slice(0, 80), description: String(req.body.description || '').slice(0, 240), markdown: markdown.slice(0, 20000), createdAt: now(), updatedAt: now() });
+    return ok(res, { skill }, 201);
+  } catch (e) { next(e); }
+});
+app.get('/api/v1/skills/:skillId', auth, async (req, res, next) => {
+  try {
+    const skill = await skills.findOne({ id: req.params.skillId, userId: req.user.id });
+    if (!skill) return error(res, 404, 'SKILL_NOT_FOUND', 'Skill not found.');
+    return ok(res, { skill });
+  } catch (e) { next(e); }
+});
+app.patch('/api/v1/skills/:skillId', auth, async (req, res, next) => {
+  try {
+    const skill = await skills.findOne({ id: req.params.skillId, userId: req.user.id });
+    if (!skill) return error(res, 404, 'SKILL_NOT_FOUND', 'Skill not found.');
+    const values = {};
+    if (req.body.name !== undefined) values.name = String(req.body.name).trim().slice(0, 80);
+    if (req.body.description !== undefined) values.description = String(req.body.description).slice(0, 240);
+    if (req.body.markdown !== undefined) values.markdown = String(req.body.markdown).trim().slice(0, 20000);
+    if (!values.name && req.body.name !== undefined) return error(res, 400, 'VALIDATION_ERROR', 'Skill name is required.');
+    if (!values.markdown && req.body.markdown !== undefined) return error(res, 400, 'VALIDATION_ERROR', 'Skill Markdown is required.');
+    values.updatedAt = now();
+    Object.assign(skill, values);
+    await skills.updateOne({ id: skill.id, userId: req.user.id }, { $set: values });
+    return ok(res, { skill });
+  } catch (e) { next(e); }
+});
+app.delete('/api/v1/skills/:skillId', auth, async (req, res, next) => {
+  try {
+    const deleted = await skills.deleteOne({ id: req.params.skillId, userId: req.user.id });
+    if (!deleted) return error(res, 404, 'SKILL_NOT_FOUND', 'Skill not found.');
     return ok(res, { deleted: true });
   } catch (e) { next(e); }
 });

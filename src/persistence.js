@@ -4,8 +4,9 @@ import UserModel from './models/user-model.model.js';
 import Recommendation from './models/recommendation.model.js';
 import UsageEvent from './models/usage-event.model.js';
 import Conversation from './models/conversation.model.js';
+import Skill from './models/skill.model.js';
 
-export const memory = { users: [], models: [], recommendations: [], usageEvents: [], conversations: [] };
+export const memory = { users: [], models: [], recommendations: [], usageEvents: [], conversations: [], skills: [] };
 let mongo = false;
 export const setPersistence = (value) => { mongo = value; };
 const id = () => crypto.randomUUID();
@@ -36,4 +37,5 @@ export const models = collection(UserModel, 'models');
 export const recommendations = collection(Recommendation, 'recommendations');
 export const usageEvents = collection(UsageEvent, 'usageEvents');
 export const conversations = collection(Conversation, 'conversations');
+export const skills = collection(Skill, 'skills');
 export { id };
