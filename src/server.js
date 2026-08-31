@@ -623,6 +623,14 @@ app.get("/api/v1/usage", auth, async (req, res, next) => {
     next(e);
   }
 });
+app.get("/api/v1/usage/history", auth, async (req, res, next) => {
+  try {
+    const days = Math.min(30, Math.max(1, Number(req.query.days) || 7));
+    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+    const events = (await usageEvents.find({ userId: req.user.id })).filter((event) => new Date(event.createdAt).getTime() >= cutoff);
+    return ok(res, { events });
+  } catch (e) { next(e); }
+});
 app.get(
   "/api/v1/recommendations/:recommendationId",
   auth,
