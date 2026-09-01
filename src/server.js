@@ -875,11 +875,14 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
     const outputTokens = Number.isFinite(providerOutputTokens)
       ? providerOutputTokens
       : estimateTokens(finalResponse);
+    const cacheTokens = Number(data.usage?.prompt_tokens_details?.cached_tokens ?? data.usage?.cached_tokens);
     await usageEvents.create({
       userId: req.user.id,
       inputTokens,
       outputTokens,
+      cacheTokens: Number.isFinite(cacheTokens) ? cacheTokens : null,
       weightedUnits: weightedUnits(inputTokens, outputTokens),
+      provider: "openrouter",
       responseMode: selectedOutputMode,
       providerReported: Number.isFinite(providerInputTokens) && Number.isFinite(providerOutputTokens),
       createdAt: now(),
@@ -1004,11 +1007,14 @@ app.post(
       const outputTokens = Number.isFinite(providerOutputTokens)
         ? providerOutputTokens
         : estimateTokens(result.response);
+      const cacheTokens = Number(result.usage?.prompt_tokens_details?.cached_tokens ?? result.usage?.cached_tokens);
       await usageEvents.create({
         userId: req.user.id,
         inputTokens,
         outputTokens,
+        cacheTokens: Number.isFinite(cacheTokens) ? cacheTokens : null,
         weightedUnits: weightedUnits(inputTokens, outputTokens),
+        provider: "openrouter",
         responseMode: selectedOutputMode,
         providerReported:
           Number.isFinite(providerInputTokens) &&
