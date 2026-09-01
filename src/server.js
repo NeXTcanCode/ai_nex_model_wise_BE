@@ -390,6 +390,18 @@ const visibleRec = (r) => {
   return safe;
 };
 
+app.post('/api/v1/prompts/optimize', auth, async (req, res, next) => {
+  try {
+    const prompt = String(req.body?.prompt || '').trim();
+    if (!prompt) return error(res, 400, 'PROMPT_REQUIRED', 'A prompt is required.');
+    if (!process.env.GROQ_API_KEY || process.env.GROQ_API_KEY.startsWith('replace-')) return error(res, 503, 'GROQ_NOT_CONFIGURED', 'Prompt optimization is temporarily unavailable.');
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` }, body: JSON.stringify({ model: process.env.GROQ_OPTIMIZER_MODEL || 'llama-3.1-8b-instant', temperature: 0.1, messages: [{ role: 'system', content: 'Rewrite the user prompt to be clearer and more concise. Preserve intent, requirements, constraints, code, URLs, paths, commands, and quoted text. Do not answer the prompt. Return only the rewritten prompt.' }, { role: 'user', content: prompt }] }) });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) return error(res, 502, 'GROQ_OPTIMIZATION_FAILED', data.error?.message || 'Prompt optimization failed.');
+    return ok(res, { optimizedPrompt: data.choices?.[0]?.message?.content?.trim() || prompt });
+  } catch (e) { next(e); }
+});
+
 app.post('/api/v1/chats', auth, async (req, res, next) => {
   try {
     const chat = await conversations.create({ id: id(), userId: req.user.id, title: chatTitle(req.body.title), messages: [], preview: '', createdAt: now(), updatedAt: now() });
