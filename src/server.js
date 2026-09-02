@@ -51,7 +51,10 @@ import {
 const app = express();
 const port = Number(process.env.PORT || 5001);
 const cookieName = "mw_token";
-const jwtSecret = process.env.JWT_SECRET || "change-me";
+const jwtSecret = process.env.JWT_SECRET;
+if (!jwtSecret) {
+  throw new Error("JWT_SECRET environment variable is required.");
+}
 const jwtExpiresIn = process.env.JWT_EXPIRES_IN || "7d";
 const nextAiUnavailableMessage =
   "NeXT AI is temporarily unavailable. Please try again in a moment.";
