@@ -1,4 +1,4 @@
-import { estimateTokens, USAGE_LIMITS } from "../usage/quota.js";
+import { estimateTokens } from "../usage/quota.js";
 
 const ALLOWED_ROLES = new Set(["user", "assistant"]);
 const MAX_MESSAGES = 40;
@@ -23,23 +23,9 @@ export const buildConversationContext = (messages, latestPrompt) => {
     cleaned.push({ role: "user", content: prompt });
   }
 
-  const latestPromptTokens = estimateTokens(prompt);
-  if (latestPromptTokens > USAGE_LIMITS.maxInputTokens) {
-    return {
-      messages: [{ role: "user", content: prompt }],
-      estimatedInputTokens: latestPromptTokens,
-    };
-  }
-
-  const selected = [];
-  let usedTokens = 0;
-  for (let index = cleaned.length - 1; index >= 0; index -= 1) {
-    const message = cleaned[index];
-    const tokens = estimateTokens(message.content);
-    if (usedTokens + tokens > USAGE_LIMITS.maxInputTokens) break;
-    selected.unshift(message);
-    usedTokens += tokens;
-  }
-
-  return { messages: selected, estimatedInputTokens: usedTokens };
+  const estimatedInputTokens = cleaned.reduce(
+    (total, message) => total + estimateTokens(message.content),
+    0
+  );
+  return { messages: cleaned, estimatedInputTokens };
 };

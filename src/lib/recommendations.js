@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
 
-export const maxPrompt = Number(process.env.MAX_PROMPT_CHARACTERS || 20000);
 export const userModels = (models, userId) => models.find({ userId });
 export const now = () => new Date().toISOString();
 export const sanitize = (value) =>

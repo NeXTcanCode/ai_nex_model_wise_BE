@@ -1,7 +1,6 @@
 export const USAGE_LIMITS = Object.freeze({
   weeklyUnits: 40_000,
   dailyUnits: 12_000,
-  maxInputTokens: 8_000,
   // requestsPerMinute: 2,
   // requestsPerDay: 15,
   // requestsPerWeek: 50,
@@ -78,8 +77,6 @@ export const usageSummary = (events, at = Date.now()) => {
 };
 
 export const quotaError = ({ summary, estimatedInputTokens }) => {
-  if (estimatedInputTokens > USAGE_LIMITS.maxInputTokens)
-    return `This prompt exceeds the ${USAGE_LIMITS.maxInputTokens.toLocaleString()} token input limit.`;
   if (summary.usedUnits + estimatedInputTokens > USAGE_LIMITS.weeklyUnits)
     return `Weekly usage limit reached: ${USAGE_LIMITS.weeklyUnits.toLocaleString()} weighted units. Your allowance resets automatically.`;
   // if (summary.dailyUsedUnits + estimatedInputTokens > USAGE_LIMITS.dailyUnits)

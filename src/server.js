@@ -20,7 +20,6 @@ import {
 } from "./persistence.js";
 import {
   assess,
-  maxPrompt,
   now,
   promptHash,
   rankModels,
@@ -506,12 +505,12 @@ const applyNextAiIdentity = (value) => {
 app.post("/api/v1/recommendations", auth, async (req, res, next) => {
   try {
     const prompt = String(req.body.prompt || "").trim();
-    if (prompt.length < 3 || prompt.length > maxPrompt)
+    if (prompt.length < 3)
       return error(
         res,
         400,
         "VALIDATION_ERROR",
-        `Prompt must be 3–${maxPrompt} characters.`
+        "Prompt must be at least 3 characters."
       );
     const ids = Array.isArray(req.body.candidateModelIds)
       ? [...new Set(req.body.candidateModelIds)]
@@ -735,8 +734,8 @@ app.delete("/api/v1/recommendations", auth, async (req, res, next) => {
 app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) => {
   try {
     const prompt = String(req.body.prompt || "").trim();
-    if (prompt.length < 1 || prompt.length > maxPrompt)
-      return error(res, 400, "VALIDATION_ERROR", `Prompt must be 1–${maxPrompt} characters.`);
+    if (prompt.length < 1)
+      return error(res, 400, "VALIDATION_ERROR", "Prompt must not be empty.");
 
     const conversationId = String(req.body.conversationId || '').trim() || null;
     const conversationRecord = conversationId
@@ -975,15 +974,6 @@ app.post(
   async (req, res, next) => {
     try {
       const prompt = String(req.body.prompt || "").trim() || "Describe this image.";
-      if (prompt.length > maxPrompt) {
-        discardUploadedImage(req.file);
-        return error(
-          res,
-          400,
-          "VALIDATION_ERROR",
-          `Prompt must be no more than ${maxPrompt} characters.`
-        );
-      }
       if (!process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY.startsWith("replace-")) {
         discardUploadedImage(req.file);
         return error(
