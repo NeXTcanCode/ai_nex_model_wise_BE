@@ -36,7 +36,7 @@ import {
 } from "./lib/usage/quota.js";
 import { buildConversationContext } from "./lib/chat/conversation.js";
 import {
-  isSafetyClassificationOnly,
+  createSafetyGate,
   NEXT_AI_RESPONSE_FALLBACK,
   NEXT_AI_RETRY_INSTRUCTION,
 } from "./lib/chat/response-validation.js";
@@ -57,6 +57,22 @@ if (!jwtSecret) {
 const jwtExpiresIn = process.env.JWT_EXPIRES_IN || "7d";
 const nextAiUnavailableMessage =
   "NeXT AI is temporarily unavailable. Please try again in a moment.";
+const chatModelRaceEnabled = process.env.CHAT_MODEL_RACE_ENABLED !== "false";
+const CHAT_MODEL_POOL_DEFAULT = [
+  "openrouter/free",
+  "deepseek/deepseek-chat-v3.1:free",
+  "meta-llama/llama-3.3-70b-instruct:free",
+  "qwen/qwen3-235b-a22b:free",
+];
+const chatModelPoolConfigured = (process.env.CHAT_MODEL_POOL || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const chatModelPool = chatModelRaceEnabled
+  ? chatModelPoolConfigured.length
+    ? chatModelPoolConfigured
+    : CHAT_MODEL_POOL_DEFAULT
+  : [chatModelPoolConfigured[0] || "openrouter/free"];
 // IMAGE CHAT TEMPORARILY DISABLED.
 // Change this to true to restore POST /api/v1/chat/image.
 const imageChatEnabled = false;
@@ -88,10 +104,15 @@ app.options("*", cors(corsOptions));
 app.use(express.json({ limit: "1mb" }));
 app.use(cookieParser());
 
-const error = (res, status, code, message, details = []) =>
-  res
+const error = (res, status, code, message, details = []) => {
+  if (res.headersSent) {
+    res.write(`data: ${JSON.stringify({ error: true, message })}\n\n`);
+    return res.end();
+  }
+  return res
     .status(status)
     .json({ success: false, error: { code, message, details } });
+};
 const ok = (res, data, status = 200) =>
   res.status(status).json({ success: true, data });
 const normalize = (s) =>
@@ -829,9 +850,27 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
     if (!process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY.startsWith("replace-"))
       return error(res, 503, "AI_PROVIDER_NOT_CONFIGURED", "OpenRouter is not configured.");
 
-    const requestOpenRouter = async (isRetry = false) => {
+    const buildChatMessages = (isRetry) => [
+      {
+        role: "system",
+        content:
+          "You are NeXT AI, the assistant inside Modelwise. " +
+          "NeXT AI is the AI assistant created by Vikas Sinha under the NeXT brand and available through Modelwise. " +
+          "Identify yourself only as NeXT AI. " +
+          "Do not speculate about or disclose an underlying provider or model. " +
+          `If asked which model you are, reply that you are NeXT AI. ${answerStyleInstruction} ${coderTaskInstruction}`,
+      },
+      ...(isRetry ? [{ role: "system", content: NEXT_AI_RETRY_INSTRUCTION }] : []),
+      ...conversation.messages,
+    ];
+
+    // Streams a single OpenRouter model. onDelta only ever receives text that
+    // has cleared the incremental safety-classification gate, so callers can
+    // forward it straight to the client as soon as it arrives.
+    const streamCandidate = async ({ model, isRetry, signal, onDelta }) => {
       const providerResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
+        signal,
         headers: {
           Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
           "Content-Type": "application/json",
@@ -839,88 +878,157 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
           "X-Title": "NeXT AI",
         },
         body: JSON.stringify({
-          model: "openrouter/free",
-          messages: [
-            {
-              role: "system",
-              content:
-                "You are NeXT AI, the assistant inside Modelwise. " +
-                "NeXT AI is the AI assistant created by Vikas Sinha under the NeXT brand and available through Modelwise. " +
-                "Identify yourself only as NeXT AI. " +
-                "Do not speculate about or disclose an underlying provider or model. " +
-                `If asked which model you are, reply that you are NeXT AI. ${answerStyleInstruction} ${coderTaskInstruction}`,
-            },
-            ...(isRetry
-              ? [{ role: "system", content: NEXT_AI_RETRY_INSTRUCTION }]
-              : []),
-            ...conversation.messages,
-          ],
+          model,
+          messages: buildChatMessages(isRetry),
+          stream: true,
+          stream_options: { include_usage: true },
           provider: { allow_fallbacks: false },
         }),
       });
-      const providerData = await providerResponse.json().catch(() => ({}));
-      return { providerResponse, providerData };
-    };
-
-    const retryTransientProviderFailure = async (result) => {
-      const status = result.providerResponse.status;
-      if (status !== 429 && status < 500) return result;
-
-      const retryAfter = Number(
-        result.providerResponse.headers.get("retry-after") || 0
-      );
-      const retryDelayMs = Number.isFinite(retryAfter)
-        ? Math.min(2000, Math.max(0, retryAfter * 1000))
-        : 0;
-      if (retryDelayMs) {
-        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+      if (!providerResponse.ok || !providerResponse.body) {
+        const errBody = await providerResponse.json().catch(() => ({}));
+        const err = new Error(`OpenRouter ${model} request failed`);
+        err.status = providerResponse.status;
+        err.body = errBody;
+        throw err;
       }
-      return requestOpenRouter(true);
+
+      const gate = createSafetyGate();
+      const reader = providerResponse.body.getReader();
+      const decoder = new TextDecoder();
+      let leftover = "";
+      let usage = null;
+      let firstChunk = true;
+      const emit = (text) => {
+        if (!text) return;
+        onDelta(firstChunk ? applyNextAiIdentity(text) : text);
+        firstChunk = false;
+      };
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        leftover += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = leftover.indexOf("\n\n")) !== -1) {
+          const rawEvent = leftover.slice(0, idx).trim();
+          leftover = leftover.slice(idx + 2);
+          if (!rawEvent.startsWith("data:")) continue;
+          const payload = rawEvent.slice(5).trim();
+          if (payload === "[DONE]") continue;
+          let json;
+          try {
+            json = JSON.parse(payload);
+          } catch {
+            continue;
+          }
+          if (json.usage) usage = json.usage;
+          const delta = json.choices?.[0]?.delta?.content;
+          if (delta) emit(gate.feed(delta));
+        }
+      }
+
+      const { isSafetyOnly, remaining } = gate.finish();
+      emit(remaining);
+      return { isSafetyOnly, usage, model };
     };
 
-    let providerResult = await requestOpenRouter();
-    if (!providerResult.providerResponse.ok) {
-      providerResult = await retryTransientProviderFailure(providerResult);
-    }
-    let { providerResponse, providerData: data } = providerResult;
-    if (!providerResponse.ok) {
-      console.error("OpenRouter chat request failed:", data.error || data);
-      return error(
-        res,
-        503,
-        "OPENROUTER_REQUEST_FAILED",
-        nextAiUnavailableMessage
-      );
+    // Races the configured pool of free OpenRouter models. The first
+    // candidate to prove it isn't a bare safety classification wins: its
+    // stream is forwarded live to the client and every other candidate is
+    // aborted immediately.
+    const raceChatPool = (isRetry) =>
+      new Promise((resolve) => {
+        const controllers = chatModelPool.map(() => new AbortController());
+        let winnerModel = null;
+        let fullText = "";
+        let winnerUsage = null;
+        let sseStarted = false;
+        let remaining = chatModelPool.length;
+        let settled = false;
+
+        const finishOnce = (result) => {
+          if (settled) return;
+          settled = true;
+          resolve(result);
+        };
+
+        chatModelPool.forEach((model, index) => {
+          streamCandidate({
+            model,
+            isRetry,
+            signal: controllers[index].signal,
+            onDelta: (text) => {
+              if (settled) return;
+              if (!winnerModel) {
+                winnerModel = model;
+                controllers.forEach((c, i) => {
+                  if (i !== index) c.abort();
+                });
+                sseStarted = true;
+                res.writeHead(200, {
+                  "Content-Type": "text/event-stream",
+                  "Cache-Control": "no-cache, no-transform",
+                  Connection: "keep-alive",
+                  "X-Accel-Buffering": "no",
+                });
+              }
+              if (winnerModel !== model) return;
+              fullText += text;
+              res.write(`data: ${JSON.stringify({ delta: text })}\n\n`);
+            },
+          })
+            .then((result) => {
+              remaining -= 1;
+              if (winnerModel === model) {
+                winnerUsage = result.usage;
+                finishOnce({ ok: true, model: result.model, usage: winnerUsage, fullText, sseStarted });
+              } else if (!winnerModel && remaining === 0) {
+                finishOnce({ ok: false, sseStarted: false });
+              }
+            })
+            .catch((err) => {
+              remaining -= 1;
+              if (winnerModel === model) {
+                finishOnce({ ok: false, sseStarted, fullText, streamError: err, model });
+              } else if (!winnerModel && remaining === 0) {
+                finishOnce({ ok: false, sseStarted: false });
+              }
+            });
+        });
+      });
+
+    let raceResult = await raceChatPool(false);
+    if (!raceResult.ok && !raceResult.sseStarted) {
+      raceResult = await raceChatPool(true);
     }
 
-    let responseContent = data.choices?.[0]?.message?.content || "";
-    if (isSafetyClassificationOnly(responseContent)) {
-      ({ providerResponse, providerData: data } = await requestOpenRouter(true));
-      if (!providerResponse.ok) {
-        console.error("OpenRouter chat retry failed:", data.error || data);
-        return error(
-          res,
-          503,
-          "OPENROUTER_REQUEST_FAILED",
-          nextAiUnavailableMessage
+    if (!raceResult.ok) {
+      if (raceResult.sseStarted) {
+        res.write(
+          `data: ${JSON.stringify({ error: true, message: nextAiUnavailableMessage })}\n\n`
         );
+        return res.end();
       }
-      responseContent = data.choices?.[0]?.message?.content || "";
+      console.error("OpenRouter chat pool failed:", raceResult.streamError || raceResult);
+      return error(res, 503, "OPENROUTER_REQUEST_FAILED", nextAiUnavailableMessage);
     }
 
-    const finalResponse = isSafetyClassificationOnly(responseContent)
-      ? NEXT_AI_RESPONSE_FALLBACK
-      : responseContent || NEXT_AI_RESPONSE_FALLBACK;
+    const finalResponse = raceResult.fullText || NEXT_AI_RESPONSE_FALLBACK;
+    if (!raceResult.fullText) {
+      res.write(`data: ${JSON.stringify({ delta: finalResponse })}\n\n`);
+    }
 
-    const providerInputTokens = Number(data.usage?.prompt_tokens);
-    const providerOutputTokens = Number(data.usage?.completion_tokens);
+    const usageData = raceResult.usage;
+    const providerInputTokens = Number(usageData?.prompt_tokens);
+    const providerOutputTokens = Number(usageData?.completion_tokens);
     const inputTokens = Number.isFinite(providerInputTokens)
       ? providerInputTokens
       : estimatedInputTokens;
     const outputTokens = Number.isFinite(providerOutputTokens)
       ? providerOutputTokens
       : estimateTokens(finalResponse);
-    const cacheTokens = Number(data.usage?.prompt_tokens_details?.cached_tokens ?? data.usage?.cached_tokens);
+    const cacheTokens = Number(usageData?.prompt_tokens_details?.cached_tokens ?? usageData?.cached_tokens);
     await usageEvents.create({
       userId: req.user.id,
       inputTokens,
@@ -942,7 +1050,7 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
       const persistedMessages = [
         ...(conversationRecord.messages || []),
         { id: id(), role: 'user', content: prompt, createdAt: timestamp, usage: null },
-        { id: id(), role: 'assistant', content: finalResponse, createdAt: timestamp, usage: data.usage || null },
+        { id: id(), role: 'assistant', content: finalResponse, createdAt: timestamp, usage: usageData || null },
       ];
       await conversations.updateOne(
         { id: conversationRecord.id, userId: req.user.id },
@@ -950,15 +1058,16 @@ app.post(["/api/v1/chat", "/api/v1/chatRequest"], auth, async (req, res, next) =
       );
     }
 
-    return ok(res, {
-      response: applyNextAiIdentity(
-        finalResponse
-      ),
-      provider: "OpenRouter Free Models Router",
-      model: data.model || "openrouter/free",
-      usage: data.usage || null,
-      quota: updatedUsage,
-    });
+    res.write(
+      `data: ${JSON.stringify({
+        done: true,
+        provider: "OpenRouter Free Models Router",
+        model: raceResult.model,
+        usage: usageData || null,
+        quota: updatedUsage,
+      })}\n\n`
+    );
+    return res.end();
   } catch (e) {
     next(e);
   }
