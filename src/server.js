@@ -103,7 +103,12 @@ const optionalPrice = (value) => {
   const price = Number(value);
   return Number.isFinite(price) && price >= 0 ? price : Number.NaN;
 };
-const publicUser = (u) => ({ id: u.id, name: u.name, email: u.email });
+const publicUser = (u) => ({
+  id: u.id,
+  name: u.name,
+  email: u.email,
+  ...(u.isGuest ? { isGuest: true } : {}),
+});
 const userModels = (userId) => models.find({ userId });
 const chatTitle = (prompt) => {
   const value = String(prompt || '').trim().replace(/\s+/g, ' ');
@@ -113,6 +118,11 @@ const skillSlug = (name) => normalize(name).replace(/[^a-z0-9]+/g, '-').replace(
 
 const signToken = (user) =>
   jwt.sign({ sub: user.id }, jwtSecret, { expiresIn: jwtExpiresIn });
+const guestTokenExpiresIn = process.env.GUEST_JWT_EXPIRES_IN || "24h";
+const signGuestToken = (guestId) =>
+  jwt.sign({ sub: guestId, guest: true }, jwtSecret, {
+    expiresIn: guestTokenExpiresIn,
+  });
 const setAuthCookie = (res, token) =>
   res.cookie(cookieName, token, {
     httpOnly: true,
@@ -134,6 +144,10 @@ async function auth(req, res, next) {
   if (!token) return error(res, 401, "UNAUTHORIZED", "Login required.");
   try {
     const payload = jwt.verify(token, jwtSecret);
+    if (payload.guest) {
+      req.user = { id: payload.sub, name: "Guest", isGuest: true };
+      return next();
+    }
     const user = await users.findOne({ id: payload.sub });
     if (!user) return error(res, 401, "UNAUTHORIZED", "Login required.");
     req.user = user;
@@ -226,6 +240,23 @@ app.post("/api/v1/auth/login", async (req, res, next) => {
     const token = signToken(user);
     setAuthCookie(res, token);
     return ok(res, authPayload(user, token));
+  } catch (e) {
+    next(e);
+  }
+});
+
+app.post("/api/v1/auth/guest", async (req, res, next) => {
+  try {
+    const guestId = `guest_${id()}`;
+    const token = signGuestToken(guestId);
+    res.cookie(cookieName, token, {
+      httpOnly: true,
+      sameSite: "none",
+      secure: true,
+      maxAge: 24 * 60 * 60 * 1000,
+    });
+    const guestUser = { id: guestId, name: "Guest", isGuest: true };
+    return ok(res, authPayload(guestUser, token), 201);
   } catch (e) {
     next(e);
   }
