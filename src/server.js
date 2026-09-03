@@ -26,6 +26,7 @@ import {
   recommendationConfidence,
   sanitize,
 } from "./lib/recommendations.js";
+import { judgeWithGroq } from "./lib/groqJudge.js";
 import {
   USAGE_LIMITS,
   estimateTokens,
@@ -591,8 +592,13 @@ app.post("/api/v1/recommendations", auth, async (req, res, next) => {
         ? sanitize(String(rawContext.contextDetails || "")).slice(0, 300)
         : "",
     };
-    const assessment = assess(prompt, context),
-      inputTokens = assessment.estimatedInputTokens,
+    let assessment;
+    try {
+      assessment = await judgeWithGroq(prompt, context);
+    } catch (judgeError) {
+      assessment = { ...assess(prompt, context), judgeSource: "heuristic" };
+    }
+    const inputTokens = assessment.estimatedInputTokens,
       scoredRanking = rankModels(candidates, assessment, { inputTokens }),
       confidence = recommendationConfidence(scoredRanking, assessment),
       ranking = scoredRanking.map(({ profileCertainty, ...model }) => model),
